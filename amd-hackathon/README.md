@@ -1,15 +1,19 @@
-# AMD Hackathon Track 1 Agent - V4 Stable Accuracy
+# AMD Hackathon Track 1 Agent - V5 Accuracy Repair
 
-This version is a stable Fireworks-first agent for Track 1.
+This version keeps the stable Fireworks-first approach from V4, but adds:
 
-Key defaults:
-- Reads `/input/tasks.json`
-- Writes `/output/results.json`
-- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
-- Uses only models from `ALLOWED_MODELS`
-- Disables risky local shortcut solvers
-- Uses low concurrency to avoid rate-limit/time pressure
-- Produces only `{task_id, answer}` in results
+- stricter task-specific prompts
+- better model ranking for current model families
+- verification pass for math, logic, NER, debug, code, and exact-format summaries
+- safer code-block cleanup for code tasks
+- very narrow exact local rules only for obvious sample-style tasks
+
+Required runtime contract:
+
+- read `/input/tasks.json`
+- write `/output/results.json`
+- read `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
+- use only models from `ALLOWED_MODELS`
 
 Docker image after GitHub Actions build:
 
@@ -17,4 +21,4 @@ Docker image after GitHub Actions build:
 ghcr.io/yongxianshen/track-1-testing:latest
 ```
 
-After passing the accuracy gate, optimize token usage later.
+After passing the accuracy gate, try setting `ENABLE_VERIFY_PASS=0` to reduce token usage.
