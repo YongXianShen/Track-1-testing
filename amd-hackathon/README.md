@@ -1,64 +1,27 @@
-# AMD Developer Hackathon Track 1 Agent
+# AMD Hackathon Track 1 Agent - V3 Hybrid Accuracy
 
-Accuracy-first Track 1 container for the General-Purpose AI Agent task.
+This container reads tasks from `/input/tasks.json` and writes `/output/results.json`.
 
-## Contract
+V3 changes:
+- restores high-confidence local solvers for easy math/sentiment/debug/logic/code patterns;
+- uses Fireworks for anything uncertain;
+- lowers default concurrency to reduce rate-limit/time pressure;
+- disables consensus/review passes by default to avoid overwriting correct answers and timing out;
+- keeps all model IDs from `ALLOWED_MODELS` and all calls through `FIREWORKS_BASE_URL`.
 
-- Reads tasks from `/input/tasks.json`
-- Writes `/output/results.json`
-- Output schema:
-
-```json
-[
-  { "task_id": "t1", "answer": "..." }
-]
-```
-
-## Runtime environment
-
-The evaluation harness injects:
-
-- `FIREWORKS_API_KEY`
-- `FIREWORKS_BASE_URL`
-- `ALLOWED_MODELS`
-
-The code reads model IDs from `ALLOWED_MODELS` at runtime and routes all API calls through `FIREWORKS_BASE_URL`.
-
-## Accuracy mode defaults
-
-This version prioritizes passing the accuracy gate:
-
-- local solvers are disabled by default because hidden prompts vary
-- model ranking is dynamic based on the allowed model names
-- consensus + review pass are enabled by default
-
-Useful environment overrides:
+Recommended first submission env defaults:
 
 ```bash
-ENABLE_LOCAL_SOLVERS=0
-ENABLE_CONSENSUS=1
-ENABLE_REVIEW_PASS=1
-MAX_CONCURRENCY=6
-TASK_TIMEOUT_SECONDS=85
-API_TIMEOUT_SECONDS=65
-GLOBAL_TIMEOUT_SECONDS=560
-```
-
-After passing the accuracy gate, token efficiency can be improved by setting:
-
-```bash
+ENABLE_LOCAL_SOLVERS=1
 ENABLE_CONSENSUS=0
 ENABLE_REVIEW_PASS=0
+MAX_CONCURRENCY=3
 ```
 
-## Local test
+If this passes the accuracy gate, then tune token usage. If it still fails and logs show no timeouts/rate limits, try a second run with:
 
 ```bash
-python test_agent.py
-```
-
-## Build
-
-```bash
-docker buildx build --platform linux/amd64 -t your-registry/amd-track1:latest .
+ENABLE_REVIEW_PASS=1
+ENABLE_CONSENSUS=0
+MAX_CONCURRENCY=2
 ```
