@@ -1,12 +1,16 @@
-# AMD Hackathon Track 1 Agent - V5 Accuracy Repair
+# AMD Hackathon Track 1 Agent - V6 Model-Ranking Repair
 
-This version keeps the stable Fireworks-first approach from V4, but adds:
+V6 is a safer accuracy repair version after V4/V5 stayed around the same accuracy.
 
-- stricter task-specific prompts
-- better model ranking for current model families
-- verification pass for math, logic, NER, debug, code, and exact-format summaries
-- safer code-block cleanup for code tasks
-- very narrow exact local rules only for obvious sample-style tasks
+Changes:
+
+- keeps Fireworks-first answering
+- improves model ranking for current Fireworks model names such as DeepSeek v4, GLM 5, Qwen 3.7 Plus, Kimi K2.7 Code, MiniMax M3, and GPT-OSS
+- uses Kimi/code models first for code generation and debugging
+- uses DeepSeek/GLM/Qwen-style models first for math, logic, factual, summary, NER, and sentiment
+- disables the full verification pass by default because it did not improve the previous score and can rewrite correct answers
+- keeps only very narrow exact local rules for obvious practice-style prompts
+- broadens category detection for NER and sentiment variants
 
 Required runtime contract:
 
@@ -21,4 +25,11 @@ Docker image after GitHub Actions build:
 ghcr.io/yongxianshen/track-1-testing:latest
 ```
 
-After passing the accuracy gate, try setting `ENABLE_VERIFY_PASS=0` to reduce token usage.
+Optional switches:
+
+```bash
+ENABLE_VERIFY_PASS=0   # default; recommended for this V6 test
+ENABLE_VERIFY_PASS=1   # only try this if V6 is still below the gate and you want a repair pass
+ENABLE_EXACT_LOCAL=1   # default; only very narrow exact rules
+MAX_CONCURRENCY=3      # default
+```
