@@ -1,27 +1,20 @@
-# AMD Hackathon Track 1 Agent - V3 Hybrid Accuracy
+# AMD Hackathon Track 1 Agent - V4 Stable Accuracy
 
-This container reads tasks from `/input/tasks.json` and writes `/output/results.json`.
+This version is a stable Fireworks-first agent for Track 1.
 
-V3 changes:
-- restores high-confidence local solvers for easy math/sentiment/debug/logic/code patterns;
-- uses Fireworks for anything uncertain;
-- lowers default concurrency to reduce rate-limit/time pressure;
-- disables consensus/review passes by default to avoid overwriting correct answers and timing out;
-- keeps all model IDs from `ALLOWED_MODELS` and all calls through `FIREWORKS_BASE_URL`.
+Key defaults:
+- Reads `/input/tasks.json`
+- Writes `/output/results.json`
+- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
+- Uses only models from `ALLOWED_MODELS`
+- Disables risky local shortcut solvers
+- Uses low concurrency to avoid rate-limit/time pressure
+- Produces only `{task_id, answer}` in results
 
-Recommended first submission env defaults:
+Docker image after GitHub Actions build:
 
-```bash
-ENABLE_LOCAL_SOLVERS=1
-ENABLE_CONSENSUS=0
-ENABLE_REVIEW_PASS=0
-MAX_CONCURRENCY=3
+```text
+ghcr.io/yongxianshen/track-1-testing:latest
 ```
 
-If this passes the accuracy gate, then tune token usage. If it still fails and logs show no timeouts/rate limits, try a second run with:
-
-```bash
-ENABLE_REVIEW_PASS=1
-ENABLE_CONSENSUS=0
-MAX_CONCURRENCY=2
-```
+After passing the accuracy gate, optimize token usage later.
