@@ -26,17 +26,19 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
     INPUT_PATH = "input/tasks.json"
     OUTPUT_PATH = "output/results.json"
 
-# V7: return to the stable V4 Fireworks-first idea, but add a few *very safe* deterministic
-# solvers for tasks where code/math can be checked without guessing.
-MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "2")), 1), 4)
-TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "80")), 30.0), 115.0)
-API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "65")), 20.0), 95.0)
-GLOBAL_TIMEOUT_SECONDS = min(max(float(os.getenv("GLOBAL_TIMEOUT_SECONDS", "565")), 90.0), 585.0)
+# V9: friend-score inspired routing. Keep safe deterministic answers, but use stronger
+# model routing + verification like the 78.9% reference repo.
+MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "6")), 1), 8)
+TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "60")), 25.0), 95.0)
+API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "45")), 15.0), 70.0)
+GLOBAL_TIMEOUT_SECONDS = min(max(float(os.getenv("GLOBAL_TIMEOUT_SECONDS", "570")), 120.0), 585.0)
 
-# Keep these conservative. The hidden set changes; broad local shortcuts can destroy accuracy.
+# Local logic is only for obvious tasks. Model calls handle everything else.
 ENABLE_SAFE_LOCAL = os.getenv("ENABLE_SAFE_LOCAL", "1").strip().lower() in {"1", "true", "yes"}
-ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "0").strip().lower() in {"1", "true", "yes"}
-MODEL_STRATEGY = os.getenv("MODEL_STRATEGY", "stable").strip().lower()  # stable | first | ranked
+ENABLE_REVIEW_PASS = os.getenv("ENABLE_REVIEW_PASS", "1").strip().lower() not in {"0", "false", "no"}
+ENABLE_CONSENSUS = os.getenv("ENABLE_CONSENSUS", "1").strip().lower() not in {"0", "false", "no"}
+MODEL_STRATEGY = os.getenv("MODEL_STRATEGY", "ranked").strip().lower()  # first | ranked
+DEFAULT_REASONING_EFFORT = os.getenv("REASONING_EFFORT", "none")
 
 @dataclass(frozen=True)
 class TaskProfile:
@@ -83,14 +85,16 @@ INSTRUCT_HINTS = ("instruct", "chat", "turbo", "assistant", "it")
 SMALL_HINTS = ("1b", "1.5b", "2b", "3b", "mini", "small", "tiny", "lite")
 
 CATEGORY_MODEL_HINTS = {
-    "codegen": ("coder", "code", "qwen", "kimi", "deepseek", "glm", "llama", "mixtral", "gemma"),
-    "debug": ("coder", "code", "qwen", "kimi", "deepseek", "glm", "llama", "mixtral", "gemma"),
-    "math": ("r1", "qwq", "reason", "deepseek", "qwen", "glm", "kimi", "llama", "mixtral", "gemma"),
-    "logic": ("r1", "qwq", "reason", "deepseek", "qwen", "glm", "kimi", "llama", "mixtral", "gemma"),
-    "summary": ("llama", "qwen", "kimi", "glm", "deepseek", "mixtral", "gemma"),
-    "ner": ("llama", "qwen", "kimi", "glm", "deepseek", "mixtral", "gemma"),
-    "sentiment": ("llama", "qwen", "kimi", "glm", "deepseek", "mixtral", "gemma"),
-    "factual": ("llama", "qwen", "kimi", "glm", "deepseek", "mixtral", "gemma"),
+    # Reference repo strategy: Kimi/code models for programming, Minimax for math/logic,
+    # Gemma for general language tasks, then strong general fallbacks.
+    "codegen": ("kimi-k2p7-code", "kimi", "coder", "code", "qwen3-coder", "qwen", "deepseek", "glm", "llama", "gemma"),
+    "debug": ("kimi-k2p7-code", "kimi", "coder", "code", "qwen3-coder", "qwen", "deepseek", "glm", "llama", "gemma"),
+    "math": ("minimax-m3", "minimax", "m3", "r1", "qwq", "reason", "deepseek", "qwen", "glm", "kimi", "llama", "gemma"),
+    "logic": ("minimax-m3", "minimax", "m3", "r1", "qwq", "reason", "deepseek", "qwen", "glm", "kimi", "llama", "gemma"),
+    "summary": ("gemma-4-31b-it", "gemma", "llama", "qwen", "kimi", "glm", "deepseek", "mixtral"),
+    "ner": ("gemma-4-31b-it", "gemma", "llama", "qwen", "kimi", "glm", "deepseek", "mixtral"),
+    "sentiment": ("gemma-4-31b-it", "gemma", "llama", "qwen", "kimi", "glm", "deepseek", "mixtral"),
+    "factual": ("gemma-4-31b-it", "gemma", "llama", "qwen", "kimi", "glm", "deepseek", "mixtral"),
 }
 
 EXPLANATION_WORDS = (
@@ -347,11 +351,17 @@ def score_model(model_id: str, category: str) -> int:
         score -= 150
     for rank, hint in enumerate(CATEGORY_MODEL_HINTS[category]):
         if hint in text:
-            score += 700 - rank * 25
+            score += 1000 - rank * 40
+    if category in {"codegen", "debug"} and "kimi-k2p7-code" in text:
+        score += 1200
     if category in {"codegen", "debug"} and ("coder" in text or "code" in text):
-        score += 700
+        score += 800
+    if category in {"math", "logic"} and ("minimax-m3" in text or ("minimax" in text and "m3" in text)):
+        score += 1300
     if category in {"math", "logic"} and any(h in text for h in ("r1", "qwq", "reason")):
-        score += 600
+        score += 700
+    if category in {"factual", "summary", "ner", "sentiment"} and "gemma-4-31b-it" in text:
+        score += 1200
     return score
 
 def ranked_models(allowed_models: list[str], category: str) -> list[str]:
@@ -360,14 +370,7 @@ def ranked_models(allowed_models: list[str], category: str) -> list[str]:
         usable = allowed_models[:]
     if MODEL_STRATEGY == "first":
         return allowed_models[:]
-    ranked = sorted(usable, key=lambda m: (score_model(m, category), -allowed_models.index(m)), reverse=True)
-    if MODEL_STRATEGY == "ranked":
-        return ranked
-    # stable: start with ranker's best, then allowed[0] as early fallback. This matches V4's safer behavior.
-    first = allowed_models[0]
-    if first in ranked and first not in ranked[:2]:
-        ranked = [ranked[0], first] + [m for m in ranked[1:] if m != first]
-    return ranked
+    return sorted(usable, key=lambda m: (score_model(m, category), -allowed_models.index(m)), reverse=True)
 
 # ---------- IO and API ----------
 def read_tasks() -> list[dict[str, Any]]:
@@ -405,16 +408,31 @@ def clean_answer(answer: str, category: str) -> str:
                 return label.capitalize()
     return answer.strip()
 
+def should_send_reasoning_effort(model: str) -> bool:
+    text = model.lower()
+    return "minimax" in text or "m3" in text
+
 async def call_fireworks(client: AsyncOpenAI, model: str, profile: TaskProfile, prompt: str) -> str:
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
             {"role": "system", "content": profile.system_prompt},
             {"role": "user", "content": prompt},
         ],
-        max_tokens=profile.max_tokens,
-        temperature=0.0,
-    )
+        "max_tokens": profile.max_tokens,
+        "temperature": 0.0,
+    }
+    if should_send_reasoning_effort(model):
+        kwargs["extra_body"] = {"reasoning_effort": DEFAULT_REASONING_EFFORT}
+    try:
+        response = await client.chat.completions.create(**kwargs)
+    except Exception:
+        # Some model/proxy combinations reject reasoning_effort; retry the same model without it.
+        if "extra_body" in kwargs:
+            kwargs.pop("extra_body", None)
+            response = await client.chat.completions.create(**kwargs)
+        else:
+            raise
     answer = response.choices[0].message.content
     if not answer or not answer.strip():
         raise RuntimeError("Model returned an empty answer.")
@@ -424,20 +442,28 @@ async def review_answer(client: AsyncOpenAI, model: str, profile: TaskProfile, p
     review_prompt = (
         "Original task:\n" + prompt + "\n\n"
         "Draft answer:\n" + draft + "\n\n"
-        "Check the draft for correctness and format. If it is correct, return it unchanged. "
-        "If it is wrong, return only the corrected final answer."
+        "Verify the draft for factual correctness, arithmetic, constraints, code edge cases, and exact requested format. "
+        "Return only the best final answer. If the draft is already correct, return it unchanged."
     )
-    response = await client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": profile.system_prompt},
-            {"role": "user", "content": review_prompt},
-        ],
-        max_tokens=profile.max_tokens,
-        temperature=0.0,
+    try:
+        return await call_fireworks(client, model, profile, review_prompt)
+    except Exception:
+        return draft
+
+async def consensus_answer(client: AsyncOpenAI, model: str, profile: TaskProfile, prompt: str, a: str, b: str) -> str:
+    if a.strip() == b.strip():
+        return a
+    vote_prompt = (
+        "Original task:\n" + prompt + "\n\n"
+        "Answer A:\n" + a + "\n\n"
+        "Answer B:\n" + b + "\n\n"
+        "Choose the answer that best satisfies the original task, or correct both if needed. "
+        "Return only the final answer in the requested format."
     )
-    answer = response.choices[0].message.content
-    return clean_answer(answer, profile.category) if answer and answer.strip() else draft
+    try:
+        return await call_fireworks(client, model, profile, vote_prompt)
+    except Exception:
+        return a
 
 async def process_task(client: AsyncOpenAI, allowed_models: list[str], task: dict[str, Any], semaphore: asyncio.Semaphore) -> dict[str, Any]:
     task_id = task["task_id"]
@@ -463,9 +489,30 @@ async def process_task(client: AsyncOpenAI, allowed_models: list[str], task: dic
                     call_fireworks(client, model, profile, prompt),
                     timeout=min(API_TIMEOUT_SECONDS, remaining),
                 )
-                if ENABLE_REVIEW_PASS and profile.category in {"math", "logic", "debug", "codegen", "ner"}:
+
+                # For hard categories, ask a different high-ranked model too when time allows.
+                # This copies the successful reference direction without using broad unsafe shortcuts.
+                if ENABLE_CONSENSUS and profile.category in {"math", "logic", "debug", "codegen", "ner"}:
                     remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining > 14:
+                    second_model = next((m for m in candidates[:4] if m != model), None)
+                    if second_model and remaining > API_TIMEOUT_SECONDS + 12:
+                        try:
+                            second = await asyncio.wait_for(
+                                call_fireworks(client, second_model, profile, prompt),
+                                timeout=min(API_TIMEOUT_SECONDS, remaining - 8),
+                            )
+                            remaining = deadline - asyncio.get_running_loop().time()
+                            if remaining > 10:
+                                answer = await asyncio.wait_for(
+                                    consensus_answer(client, model, profile, prompt, answer, second),
+                                    timeout=min(API_TIMEOUT_SECONDS, remaining),
+                                )
+                        except Exception as exc:
+                            logger.warning("Task %s consensus failed, keeping first answer: %s", task_id, exc)
+
+                if ENABLE_REVIEW_PASS and profile.category in {"math", "logic", "debug", "codegen", "ner", "summary", "factual"}:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining > 12:
                         try:
                             answer = await asyncio.wait_for(
                                 review_answer(client, model, profile, prompt, answer),
