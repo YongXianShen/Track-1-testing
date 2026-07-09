@@ -1,35 +1,43 @@
-# AMD Hackathon Track 1 Agent - V6 Model-Ranking Repair
+# AMD Hackathon Track 1 Agent
 
-V6 is a safer accuracy repair version after V4/V5 stayed around the same accuracy.
+V7 is based on the most stable Fireworks-first version, with a few conservative local deterministic solvers for simple arithmetic, clear sentiment, and exact simple code/logic patterns.
 
-Changes:
+## Contract
 
-- keeps Fireworks-first answering
-- improves model ranking for current Fireworks model names such as DeepSeek v4, GLM 5, Qwen 3.7 Plus, Kimi K2.7 Code, MiniMax M3, and GPT-OSS
-- uses Kimi/code models first for code generation and debugging
-- uses DeepSeek/GLM/Qwen-style models first for math, logic, factual, summary, NER, and sentiment
-- disables the full verification pass by default because it did not improve the previous score and can rewrite correct answers
-- keeps only very narrow exact local rules for obvious practice-style prompts
-- broadens category detection for NER and sentiment variants
+- Reads tasks from `/input/tasks.json`
+- Writes results to `/output/results.json`
+- Output schema: `[ { "task_id": ..., "answer": "..." } ]`
+- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` from the runtime environment
+- Calls only models listed in `ALLOWED_MODELS`
 
-Required runtime contract:
+## Useful environment knobs
 
-- read `/input/tasks.json`
-- write `/output/results.json`
-- read `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
-- use only models from `ALLOWED_MODELS`
-
-Docker image after GitHub Actions build:
-
-```text
-ghcr.io/yongxianshen/track-1-testing:latest
-```
-
-Optional switches:
+Defaults are safe for hidden evaluation:
 
 ```bash
-ENABLE_VERIFY_PASS=0   # default; recommended for this V6 test
-ENABLE_VERIFY_PASS=1   # only try this if V6 is still below the gate and you want a repair pass
-ENABLE_EXACT_LOCAL=1   # default; only very narrow exact rules
-MAX_CONCURRENCY=3      # default
+ENABLE_SAFE_LOCAL=1
+ENABLE_REVIEW_PASS=0
+MODEL_STRATEGY=stable
+MAX_CONCURRENCY=2
+```
+
+If score drops, try the safest Fireworks-only mode by setting:
+
+```bash
+ENABLE_SAFE_LOCAL=0
+MODEL_STRATEGY=stable
+```
+
+If model ranking seems bad, try:
+
+```bash
+MODEL_STRATEGY=first
+```
+
+## Docker image
+
+Build linux/amd64 and push to GHCR, for example:
+
+```bash
+docker buildx build --platform linux/amd64 -t ghcr.io/yongxianshen/track-1-testing:latest --push .
 ```
