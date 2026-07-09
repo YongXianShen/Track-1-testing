@@ -26,9 +26,8 @@ if INPUT_PATH == "/input/tasks.json" and not os.path.exists(INPUT_PATH) and os.p
     INPUT_PATH = "input/tasks.json"
     OUTPUT_PATH = "output/results.json"
 
-# V8: keep the V7 stable Fireworks-first behavior, but add a few more high-confidence
-# deterministic solvers for simple benchmark-style tasks. These are intentionally narrow:
-# when a pattern is not obvious, the Fireworks model still answers.
+# V7: return to the stable V4 Fireworks-first idea, but add a few *very safe* deterministic
+# solvers for tasks where code/math can be checked without guessing.
 MAX_CONCURRENCY = min(max(int(os.getenv("MAX_CONCURRENCY", "2")), 1), 4)
 TASK_TIMEOUT_SECONDS = min(max(float(os.getenv("TASK_TIMEOUT_SECONDS", "80")), 30.0), 115.0)
 API_TIMEOUT_SECONDS = min(max(float(os.getenv("API_TIMEOUT_SECONDS", "65")), 20.0), 95.0)
@@ -191,12 +190,11 @@ def local_math(prompt: str) -> str | None:
         if val is not None:
             return fmt_num(val)
 
-    # Store/items pattern: starts with N, sells P%, then M more, ask remaining.
-    # Examples: "has 240 items, sells 15% on Monday and 60 more on Tuesday".
+    # Store/items pattern: starts with N, sells P%, then sells M more, ask remaining.
     m = re.search(
         r"(?:has|starts? with|there are)\s+(\d+(?:\.\d+)?)\s+\w+.*?"
         r"(?:sells?|sold|uses?|used|removes?|removed)\s+(\d+(?:\.\d+)?)\s*%.*?"
-        r"(?:and|then).*?(?:sells?|sold|uses?|used|removes?|removed)?\s*(\d+(?:\.\d+)?)\s+(?:more|additional|extra|items?|units?)?.*?"
+        r"(?:and|then).*?(?:sells?|sold|uses?|used|removes?|removed)\s+(\d+(?:\.\d+)?)\s+(?:more|additional|extra|items?|units?)?.*?"
         r"(?:remain|remaining|left)",
         compact,
     )
@@ -249,179 +247,7 @@ def local_sentiment(prompt: str) -> str | None:
         return "Neutral"
     return None
 
-def local_codegen(prompt: str) -> str | None:
-    text = prompt.lower()
-    # Only exact/simple well-known specs; otherwise model handles it.
-    py = "python" in text or "def " in text
-    if py and "is_even" in text and "function" in text:
-        return "def is_even(n):\n    return n % 2 == 0"
-    if py and ("second-largest" in text or "second largest" in text) and "function" in text:
-        return (
-            "def second_largest(nums):\n"
-            "    unique = sorted(set(nums))\n"
-            "    if len(unique) < 2:\n"
-            "        raise ValueError(\"Need at least two distinct numbers\")\n"
-            "    return unique[-2]"
-        )
-    if py and "palindrome" in text and "function" in text:
-        return "def is_palindrome(s):\n    s = str(s)\n    return s == s[::-1]"
-    if py and "factorial" in text and "function" in text:
-        return (
-            "def factorial(n):\n"
-            "    if n < 0:\n"
-            "        raise ValueError(\"n must be non-negative\")\n"
-            "    result = 1\n"
-            "    for i in range(2, n + 1):\n"
-            "        result *= i\n"
-            "    return result"
-        )
-    if py and ("reverse" in text and "string" in text and "function" in text):
-        return "def reverse_string(s):\n    return s[::-1]"
-    if py and ("sum" in text and "list" in text and "function" in text):
-        return "def sum_list(nums):\n    return sum(nums)"
-    return None
-
-def local_debug(prompt: str) -> str | None:
-    text = prompt.lower()
-    if "def get_max" in text and "return nums[0]" in text:
-        return "def get_max(nums):\n    if not nums:\n        raise ValueError(\"nums must not be empty\")\n    return max(nums)"
-    if "def add" in text and re.search(r"return\s+a\s*-\s*b", text):
-        return "def add(a, b):\n    return a + b"
-    if "off-by-one" in text and "range" in text and "len" in text:
-        # Too many possible fixes; let the model handle it.
-        return None
-    return None
-
-def local_factual(prompt: str) -> str | None:
-    text = prompt.lower()
-    # Very common practice-style factual prompt. Keep exact/narrow to avoid hallucinating.
-    if "capital of australia" in text:
-        if "body of water" in text or "near" in text:
-            return "Canberra; it is near Lake Burley Griffin."
-        return "Canberra"
-    return None
-
-def local_ner(prompt: str) -> str | None:
-    # Narrow deterministic NER for simple "Extract ... from: <sentence>" prompts.
-    # It is intentionally conservative and only returns when at least two clear entity types are found.
-    m = re.search(r"(?:from|text)\s*:\s*(.+)$", prompt, flags=re.IGNORECASE | re.DOTALL)
-    if not m:
-        return None
-    text = m.group(1).strip().strip('"')
-    if len(text) > 350:
-        return None
-
-    entities: list[tuple[str, str, int]] = []
-
-    # Dates: explicit months or relative month phrases.
-    month_re = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-    for dm in re.finditer(rf"\b(?:last|next|this)?\s*{month_re}(?:\s+\d{{1,2}})?(?:,?\s+\d{{4}})?\b|\b\d{{1,2}}\s+{month_re}\s+\d{{4}}\b", text):
-        entities.append((dm.group(0).strip(), "DATE", dm.start()))
-
-    # Organisations with common suffixes or AI/labs-style names.
-    org_pat = r"\b(?:[A-Z][A-Za-z0-9&.-]+(?:\s+|$)){1,5}(?:AI|Labs?|University|Inc\.?|Corp\.?|Corporation|Ltd\.?|LLC|Bank|Google|Microsoft|OpenAI|Fireworks AI)\b"
-    for om in re.finditer(org_pat, text):
-        ent = om.group(0).strip()
-        entities.append((ent, "ORGANIZATION", om.start()))
-
-    # Locations after common prepositions.
-    for lm in re.finditer(r"\b(?:in|at|from|near)\s+([A-Z][A-Za-z.-]+(?:\s+[A-Z][A-Za-z.-]+){0,2})\b", text):
-        ent = lm.group(1).strip()
-        # Avoid capturing org/date words as locations.
-        if not re.search(r"\b(?:AI|Inc|Corp|University|March|April|January|February|May|June|July|August|September|October|November|December)\b", ent):
-            entities.append((ent, "LOCATION", lm.start(1)))
-
-    # Person names: two or three title-case words, excluding already captured org/location spans.
-    taken_spans: list[tuple[int, int]] = []
-    for ent, typ, start in entities:
-        idx = text.find(ent, max(0, start - 2))
-        if idx >= 0:
-            taken_spans.append((idx, idx + len(ent)))
-    def overlaps(a: int, b: int) -> bool:
-        return any(a < y and b > x for x, y in taken_spans)
-
-    for pm in re.finditer(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b", text):
-        ent = pm.group(0)
-        if overlaps(pm.start(), pm.end()):
-            continue
-        if ent.split()[0] in {"Last", "Next", "This"}:
-            continue
-        entities.append((ent, "PERSON", pm.start()))
-
-    # Remove duplicates and sort by text order.
-    dedup: dict[tuple[str, str], int] = {}
-    for ent, typ, pos in entities:
-        dedup.setdefault((ent, typ), pos)
-    ordered = sorted(((pos, ent, typ) for (ent, typ), pos in dedup.items()), key=lambda x: x[0])
-
-    # Conservative: only use local NER if it found a reasonable mix of entities.
-    types = {typ for _, _, typ in ordered}
-    if len(ordered) >= 2 and ("PERSON" in types or "ORGANIZATION" in types) and ("DATE" in types or "LOCATION" in types):
-        return "; ".join(f"{ent} — {typ}" for _, ent, typ in ordered)
-    return None
-
-def solve_pet_ownership(prompt: str) -> str | None:
-    # Handles simple puzzles like: Three friends, Sam, Jo, and Lee, each own a different pet:
-    # cat, dog, bird. Sam does not own the bird. Jo owns the dog. Who owns the cat?
-    text = prompt
-    low = prompt.lower()
-    if not ("own" in low and "different" in low and "who" in low):
-        return None
-
-    # Extract names before "each" or after a leading count phrase.
-    prefix = re.split(r"\beach\b", text, flags=re.IGNORECASE)[0]
-    names = re.findall(r"\b[A-Z][a-zA-Z]+\b", prefix)
-    names = [n for n in names if n.lower() not in {"three", "two", "four", "five", "friends"}]
-    if len(names) < 2 or len(names) > 5:
-        return None
-
-    # Extract listed pets after colon, if present; otherwise look for common pet words.
-    pets: list[str] = []
-    cm = re.search(r":\s*([^?.]+)", text)
-    if cm:
-        pets = [p.strip().lower().rstrip("s") for p in re.split(r",|\band\b", cm.group(1)) if p.strip()]
-        pets = [re.sub(r"[^a-z-]", "", p) for p in pets]
-        pets = [p for p in pets if p]
-    if len(pets) != len(names):
-        common = ["cat", "dog", "bird", "fish", "hamster", "rabbit"]
-        pets = [p for p in common if re.search(rf"\b{p}s?\b", low)]
-    pets = list(dict.fromkeys(pets))
-    if len(pets) != len(names):
-        return None
-
-    owns: dict[str, str] = {}
-    nots: set[tuple[str, str]] = set()
-    for name in names:
-        for pet in pets:
-            if re.search(rf"\b{name}\b\s+(?:owns?|has)\s+(?:the\s+)?{pet}\b", text, re.IGNORECASE):
-                owns[name] = pet
-            if re.search(rf"\b{name}\b\s+(?:does\s+not|doesn't|did\s+not|didn't)\s+(?:own|have)\s+(?:the\s+)?{pet}\b", text, re.IGNORECASE):
-                nots.add((name, pet))
-
-    # Brute force all bijections.
-    import itertools
-    sols = []
-    for perm in itertools.permutations(pets):
-        assign = dict(zip(names, perm))
-        if any(assign.get(n) != p for n, p in owns.items()):
-            continue
-        if any(assign.get(n) == p for n, p in nots):
-            continue
-        sols.append(assign)
-    if len(sols) != 1:
-        return None
-    q = re.search(r"who\s+owns?\s+(?:the\s+)?([a-z]+)", low)
-    if q:
-        target = q.group(1).rstrip("s")
-        for n, p in sols[0].items():
-            if p == target:
-                return n
-    return "; ".join(f"{n}: {p}" for n, p in sols[0].items())
-
 def local_logic(prompt: str) -> str | None:
-    pet = solve_pet_ownership(prompt)
-    if pet:
-        return pet
     text = prompt.lower()
     # Exact age chain: A older than B, B older than C. who youngest/oldest.
     pairs = re.findall(r"\b([A-Z][A-Za-z0-9_-]*)\s+is\s+older\s+than\s+([A-Z][A-Za-z0-9_-]*)\b", prompt)
@@ -449,14 +275,35 @@ def local_logic(prompt: str) -> str | None:
             return candidates[0]
     return None
 
+def local_codegen(prompt: str) -> str | None:
+    text = prompt.lower()
+    # Only exact/simple well-known specs; otherwise model handles it.
+    if "python" in text and "is_even" in text and "function" in text:
+        return "def is_even(n):\n    return n % 2 == 0"
+    if "python" in text and ("second-largest" in text or "second largest" in text) and "function" in text:
+        return (
+            "def second_largest(nums):\n"
+            "    unique = sorted(set(nums))\n"
+            "    if len(unique) < 2:\n"
+            "        raise ValueError(\"Need at least two distinct numbers\")\n"
+            "    return unique[-2]"
+        )
+    return None
+
+def local_debug(prompt: str) -> str | None:
+    text = prompt.lower()
+    if "def get_max" in text and "return nums[0]" in text:
+        return "def get_max(nums):\n    if not nums:\n        raise ValueError(\"nums must not be empty\")\n    return max(nums)"
+    if "def add" in text and re.search(r"return\s+a\s*-\s*b", text):
+        return "def add(a, b):\n    return a + b"
+    return None
+
 def safe_local_answer(prompt: str, category: str) -> str | None:
     if not ENABLE_SAFE_LOCAL:
         return None
     solvers = {
-        "factual": local_factual,
         "math": local_math,
         "sentiment": local_sentiment,
-        "ner": local_ner,
         "logic": local_logic,
         "codegen": local_codegen,
         "debug": local_debug,
