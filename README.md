@@ -1,34 +1,24 @@
-# Track 1 No-Paid-Gemma Router V12
+# Brocacho Track 1 — Stable Plus V17
 
-This version is designed for teams that do **not** want to pay for on-demand Gemma deployment.
+A no-paid-deployment hybrid AI router for Track 1 of the AMD Developer Hackathon: ACT II.
 
-## Strategy
+## Runtime contract
 
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
-- Uses only `ALLOWED_MODELS`
-- Does **not** select Gemma by default (`ENABLE_GEMMA=0`)
-- Uses narrow local solvers for simple math/sentiment/logic to save tokens
-- Uses one Fireworks call per unsolved task, with fallback only if the first call fails/returns empty
+- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` from the environment
+- Uses only models supplied through `ALLOWED_MODELS`
+- Does not require Gemma deployment or a personal API key
 
-## Model plan
+## Strategy
 
-The actual model names depend on `ALLOWED_MODELS` at runtime. The code logs them to stderr as `MODEL_PLAN` and writes `/output/model_usage.json`.
+- High-confidence deterministic local solvers for selected tasks
+- One Fireworks call for other tasks
+- Fallback only when the first response fails, is empty, or is truncated
+- Dynamic model routing for language, reasoning, and code tasks
 
-Default routing:
+## Docker image
 
-- `sentiment` -> SMALL capable non-Gemma chat model
-- `factual`, `summary`, `NER` -> LANGUAGE model, preferring Qwen / GLM / GPT-OSS / DeepSeek / Minimax
-- `math`, `logic` -> REASON model, preferring Minimax / DeepSeek / Qwen / GLM / GPT-OSS
-- `debug`, `codegen` -> CODE model, preferring Kimi / coder / code models
+`ghcr.io/yongxianshen/track-1-testing:latest`
 
-## Recommended environment
-
-```text
-ENABLE_GEMMA=0
-ENABLE_LOCAL=1
-CONCURRENCY=4
-REASONING_EFFORT=none
-```
-
-Only set `ENABLE_GEMMA=1` if your team has already deployed Gemma and it appears in `ALLOWED_MODELS`.
+The GitHub Actions workflow automatically rebuilds and pushes the Linux AMD64 image whenever `amd-hackathon/**` or the workflow file changes on `main`.

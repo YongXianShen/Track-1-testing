@@ -1,79 +1,25 @@
-# Track 1 V16.1 — Runtime-Safe Local Zero-Token Router
+# Track 1 Stable Plus V17
 
-A fully local Track 1 agent. It makes **zero calls** to `FIREWORKS_BASE_URL`, so its recorded Fireworks token usage is zero.
+A conservative refinement of the proven V12 hybrid router.
 
-## Model
+## Strategy
 
-Default bundled model:
+- High-confidence deterministic arithmetic/sentiment/logic answers use zero Fireworks tokens.
+- Every other task uses one category-appropriate model from `ALLOWED_MODELS`.
+- Gemma stays disabled by default; no paid deployment is needed.
+- A second call occurs only if the first answer is empty or truncated.
+- Short adaptive output budgets reduce token use without compressing factual answers below the proven completeness range.
 
-- **Qwen3-1.7B**, `Q4_K_M` GGUF quantization
-- Runtime: official `llama.cpp` server
-- Model is downloaded while the Docker image is built and stored inside the image
-- No paid deployment, personal API key, Ollama, or network access is required at evaluation time
+## Required runtime contract
 
-Qwen3-1.7B was chosen because it is smaller and more mature in llama.cpp than Qwen3.5-2B because the grader has only 4 GB RAM, 2 vCPU, and a 10-minute limit. The 4-bit model leaves more memory and time for the agent while still supporting all eight task categories.
-
-## Pipeline
-
-```text
-/input/tasks.json
-      ↓
-regex category router
-      ↓
-high-confidence exact solver ── yes → answer locally
-      ↓ no
-bundled Qwen3.5-2B via llama.cpp
-      ↓
-format validation / short reasoning check
-      ↓
-/output/results.json
-```
-
-## Build
-
-```bash
-docker build --platform linux/amd64 -t track1-local-v16 .
-```
-
-The build downloads about 1.3 GB of model weights. The final image remains below the hackathon's 10 GB compressed limit.
+- Reads `/input/tasks.json`
+- Writes `/output/results.json`
+- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
+- Uses only models supplied in `ALLOWED_MODELS`
 
 ## Local test
 
 ```bash
-python3 test_agent.py
-mkdir -p input output
-# place tasks at input/tasks.json
-docker run --rm \
-  -v "$PWD/input:/input:ro" \
-  -v "$PWD/output:/output" \
-  track1-local-v16
+pip install -r requirements.txt
+python -m pytest -q
 ```
-
-## Output
-
-```json
-[
-  {"task_id":"t1","answer":"..."}
-]
-```
-
-`/output/model_usage.json` records:
-
-```json
-{"fireworks_calls":0,"fireworks_tokens":0,"local_model":"Qwen3.5-2B-Q4_K_M"}
-```
-
-## Important
-
-A 100% score cannot be guaranteed because the 19 evaluation tasks are hidden and the LLM judge is not perfectly deterministic. This version is designed for zero scored tokens and broad capability; it does not contain hidden answers or hardcoded evaluation data.
-
-
-## Runtime safety changes
-
-- Uses Qwen3-1.7B Q4_K_M instead of Qwen3.5-2B.
-- Reduces context to 2048 and batch sizes to 64/32.
-- Disables startup warmup and the second reasoning pass by default.
-- Locates `llama-server` robustly.
-- Writes `/output/runtime_diagnostic.json` and exits cleanly if model startup fails.
-
-Before publishing, run the 4 GB / 2 CPU smoke test shown in `smoke-test.ps1`.

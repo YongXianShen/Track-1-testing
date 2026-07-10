@@ -1,33 +1,12 @@
-# Fully local Track 1 image: no Fireworks calls at runtime.
-# The official llama.cpp server image supports linux/amd64.
-FROM ghcr.io/ggml-org/llama.cpp:server
+FROM --platform=$TARGETPLATFORM python:3.11-slim
 
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-ARG MODEL_REPO=ggml-org/Qwen3-1.7B-GGUF
-ARG MODEL_FILE=Qwen3-1.7B-Q4_K_M.gguf
-RUN mkdir -p /models \
-    && curl -fL --retry 6 --retry-delay 3 \
-       "https://huggingface.co/${MODEL_REPO}/resolve/main/${MODEL_FILE}?download=true" \
-       -o /models/model.gguf \
-    && test -s /models/model.gguf
-
-WORKDIR /app/track1
-COPY . /app/track1
-
-ENV INPUT_PATH=/input/tasks.json \
-    OUTPUT_PATH=/output/results.json \
-    LOCAL_MODEL_PATH=/models/model.gguf \
-    LOCAL_MODEL_NAME=Qwen3-1.7B-Q4_K_M \
-    LOCAL_THREADS=2 \
-    LOCAL_CONTEXT=2048 \
-    DEADLINE_SECONDS=510 \
-    VERIFY_REASONING=0 \
-    OMP_NUM_THREADS=2 \
-    MALLOC_ARENA_MAX=2 \
-    PYTHONUNBUFFERED=1
-
-ENTRYPOINT ["/usr/bin/python3", "/app/track1/agent.py"]
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY src ./src
+RUN mkdir -p /input /output
+ENTRYPOINT ["python", "-m", "src.main"]
