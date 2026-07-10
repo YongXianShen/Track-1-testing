@@ -1,101 +1,60 @@
-"""Deterministic routing for the eight Track 1 task categories.
-
-The router is intentionally conservative: explicit task wording wins, code is
-recognized before numeric reasoning, and everything ambiguous falls back to a
-strong general model rather than a fragile local guess.
-"""
+"""Conservative task router for the 8 Track 1 categories."""
 from __future__ import annotations
 
 import re
 
 Category = str
 
-_SENTIMENT = re.compile(
-    r"\bsentiment\b|\bpolarity\b|classif(?:y|ication).{0,80}"
-    r"\b(?:positive|negative|neutral|mixed)\b|"
-    r"\b(?:review|feedback)\b.{0,80}\b(?:sentiment|tone)\b",
-    re.I | re.S,
-)
-_SUMMARY = re.compile(
-    r"summari[sz]e|\bsummary\b|\btl;?dr\b|\bcondense\b|\bshorten\b|"
-    r"\brecap\b|\bgist\b|exactly\s+\d+\s+sentences?|\bone sentence\b|"
-    r"\bsingle sentence\b|\bin\s+\d+\s+words?\b|\bin\s+\d+\s+bullets?\b",
-    re.I,
-)
-_NER = re.compile(
-    r"named entit|\bNER\b|entities?\s+and\s+(?:their\s+)?types?|"
-    r"(?:extract|identify|list).{0,100}\b(?:entities?|persons?|people|"
-    r"organi[sz]ations?|companies|locations?|cities|countries|dates?)\b",
-    re.I | re.S,
-)
+EXPLICIT = {
+    "sentiment": re.compile(r"\bsentiment\b|\bpolarity\b|classify.{0,60}\b(positive|negative|neutral|mixed)\b|\bpositive[,/ ]+negative[,/ ]+(or )?neutral\b|\b(review|feedback).{0,60}\b(sentiment|tone)\b", re.I),
+    "summary": re.compile(r"summari[sz]e|summary|tl;?dr|condense|shorten|recap|gist|exactly \d+ sentence|one sentence|single sentence|in \d+ words|in \d+ bullets", re.I),
+    "ner": re.compile(r"named entit|\bNER\b|entities and their types|extract.{0,90}(person|people|organi[sz]ation|company|location|city|country|date|entity|entities)|identify.{0,90}(person|people|organi[sz]ation|company|location|date|entities)", re.I),
+}
 
-_CODE_BLOCK = re.compile(
-    r"```|\bdef\s+[A-Za-z_]\w*\s*\(|#include\s*[<\"]|"
-    r"\b(?:public|private|protected)\s+(?:static\s+)?(?:class|void|int|String)\b|"
-    r"\bclass\s+[A-Za-z_]\w*\s*[:{]|\bSELECT\b.{0,120}\bFROM\b|"
-    r"console\.log\s*\(|System\.out\.|=>\s*[{(]?",
-    re.I | re.S,
-)
-_CODE_TOPIC = re.compile(
-    r"\bcode\b|\bsnippet\b|\bfunction\b|\bmethod\b|\bprogram\b|"
-    r"\bscript\b|\balgorithm\b|\bregex\b|\bSQL\b|\bPython\b|"
-    r"\bJavaScript\b|\bTypeScript\b|\bJava\b|\bC\+\+\b|\bRust\b",
-    re.I,
-)
-_DEBUG = re.compile(
-    r"\bdebug\b|\bbug(?:gy)?\b|\bbroken\b|\bfix\b|\bincorrect\b|"
-    r"\bwrong\b|not working|\bfails?\b|\berror\b|\bexception\b|"
-    r"find\s+and\s+fix|should.{0,70}\bbut\b|what(?:'s| is) wrong",
-    re.I | re.S,
-)
-_GENERATE = re.compile(
-    r"\bwrite\b|\bimplement\b|\bcreate\b|\bbuild\b|\bgenerate\b|"
-    r"\bdefine\b|\bprovide\b|\bcomplete\b",
-    re.I,
-)
+STRONG_CODE = re.compile(r"```|\bdef\s+\w+|#include|console\.log|System\.out|\bSELECT\b.{0,80}\bFROM\b|\bclass\s+\w+|\bimport\s+\w+|\)\s*\{", re.I)
+WEAK_CODE = re.compile(r"\bcode\b|\bsnippet\b|\bfunction\b|\bmethod\b|\bclass\b|\bprogram\b|\bscript\b|\balgorithm\b|\bregex\b|\bSQL\b|\bpython\b|\bjavascript\b|\bjava\b|\bc\+\+\b", re.I)
+WRITE = re.compile(r"\b(write|implement|create|build|generate|develop|complete|define|provide)\b", re.I)
+FIX = re.compile(r"\bfix\b|\bdebug\b|\bbug\b|\bbuggy\b|\bbroken\b|wrong|incorrect|not working|fails?|error|exception|should.{0,60}but|find and fix|what'?s wrong", re.I)
 
-_LOGIC = re.compile(
-    r"\blogic(?:al)?\b|\bdeductive\b|\bconstraint\b|\bpuzzle\b|\briddle\b|"
-    r"\bclues?\b|\btruth(?:ful)?\b|\bliars?\b|\bknights?\b|\bknaves?\b|"
-    r"\bseating\b|\barrangement\b|each.{0,50}\bdifferent\b|\bwho owns\b|"
-    r"\bowns the\b|\bleft of\b|\bright of\b|\bolder than\b|\byounger than\b|"
-    r"\bmust be true\b|\bcan(?:not|'t) be true\b|satisf(?:y|ies).{0,50}conditions?",
-    re.I | re.S,
-)
-_DIGIT = re.compile(r"\d")
-_MATH = re.compile(
-    r"\bcalculate\b|\bcompute\b|\bevaluate\b|\bsolve\b|\bhow (?:many|much)\b|"
-    r"\bpercent(?:age)?\b|%|\baverage\b|\bmean\b|\bsum\b|\btotal\b|"
-    r"\bremain(?:ing)?\b|\bleft\b|\bsold\b|\bdiscount\b|\bprofit\b|"
-    r"\bratio\b|\binterest\b|\bcost\b|\bprice\b|\barea\b|\bperimeter\b|"
-    r"\bvolume\b|\bspeed\b|\bdistance\b|\brate\b|\bincrease\b|\bdecrease\b|"
-    r"[+×÷=]",
-    re.I,
-)
+DIGIT = re.compile(r"\d")
+MATH_SIGNAL = re.compile(r"calculate|compute|evaluate|solve|how (many|much|old|far|fast|long)|percent|percentage|%|average|mean|sum|total|remain|remaining|left|sold|discount|profit|ratio|interest|cost|price|items?|units?|times|plus|minus|divided|multiply|area|perimeter|volume|speed|distance|rate|increase|decrease|[+×÷]", re.I)
+LOGIC_SIGNAL = re.compile(r"logic|deductive|constraint|puzzle|riddle|clue|truth|liar|knight|knave|arrangement|seating|ranking|order|each.{0,45}different|who owns|owns the|left of|right of|older than|younger than|first to last|satisfy", re.I)
 
 
-def classify(prompt: str) -> Category:
-    text = prompt.strip()
+def classify(prompt: str) -> Category | None:
+    p = prompt.strip()
+    for cat, rx in EXPLICIT.items():
+        if rx.search(p):
+            return cat
 
-    if _SENTIMENT.search(text):
-        return "sentiment"
-    if _SUMMARY.search(text):
-        return "summary"
-    if _NER.search(text):
-        return "ner"
-
-    code_context = bool(_CODE_BLOCK.search(text)) or bool(_CODE_TOPIC.search(text))
-    if code_context and _DEBUG.search(text):
-        return "debug"
-    if code_context and _GENERATE.search(text):
-        return "codegen"
-    if _CODE_BLOCK.search(text):
+    is_code = bool(STRONG_CODE.search(p)) or bool(WEAK_CODE.search(p) and (WRITE.search(p) or FIX.search(p)))
+    if is_code:
+        if FIX.search(p):
+            return "debug"
+        if WRITE.search(p):
+            return "codegen"
         return "debug"
 
-    # Logic clues take precedence over incidental numbers in a puzzle.
-    if _LOGIC.search(text):
+    has_math = bool(DIGIT.search(p)) and bool(MATH_SIGNAL.search(p))
+    has_logic = bool(LOGIC_SIGNAL.search(p))
+    if has_logic and not (has_math and not re.search(r"clue|constraint|logic|puzzle|each.{0,45}different|who owns|arrangement|seating", p, re.I)):
         return "logic"
-    if _DIGIT.search(text) and _MATH.search(text):
+    if has_math:
         return "math"
-
+    if has_logic:
+        return "logic"
     return "factual"
+
+
+def fallback_messages(prompt: str) -> list[dict[str, str]]:
+    return [
+        {"role": "system", "content": "Return one letter only."},
+        {"role": "user", "content": "A factual, B math, C sentiment, D summary, E NER, F debugging, G logic, H code generation.\nTask: " + prompt},
+    ]
+
+
+def parse_fallback_letter(text: str) -> str:
+    letter = (text or "").strip().upper()[:1]
+    return {
+        "A": "factual", "B": "math", "C": "sentiment", "D": "summary", "E": "ner", "F": "debug", "G": "logic", "H": "codegen",
+    }.get(letter, "factual")

@@ -1,7 +1,6 @@
-"""Brocacho Precision Router V14.
+"""Track 1 no-paid-Gemma hybrid router V12.
 
-A low-token, one-call-first agent for AMD Hackathon Track 1. It uses only
-harness-provided models and does not depend on paid Gemma deployment.
+Goal: higher accuracy with low tokens, without requiring paid on-demand Gemma deployment.
 """
 from __future__ import annotations
 
@@ -12,151 +11,135 @@ import sys
 import time
 from typing import Any
 
-from . import client, local, models, prompts, router
+from . import client, models, prompts, router, solvers
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
-DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", str(8.6 * 60)))
-CONCURRENCY = max(1, min(int(os.environ.get("CONCURRENCY", "4")), 8))
-ENABLE_LOCAL = os.environ.get("ENABLE_LOCAL", "1").lower() in {"1", "true", "yes"}
+DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", str(8.5 * 60)))
+CONCURRENCY = int(os.environ.get("CONCURRENCY", "4"))
+ENABLE_LOCAL = os.environ.get("ENABLE_LOCAL", "1").strip().lower() in {"1", "true", "yes"}
+ENABLE_LLM_ROUTE_FALLBACK = os.environ.get("ENABLE_LLM_ROUTE_FALLBACK", "0").strip().lower() in {"1", "true", "yes"}
 
-_STARTED = time.monotonic()
-_USAGE: list[dict[str, Any]] = []
-
-
-def _log(event: str, **fields: Any) -> None:
-    print(f"{event} {json.dumps(fields, ensure_ascii=False)}", file=sys.stderr, flush=True)
+START = time.monotonic()
+CALL_LOG: list[dict[str, Any]] = []
+MODEL_PLAN: dict[str, str] = {}
 
 
-def _task_prompt(task: dict[str, Any]) -> str:
+def log(event: str, **fields: Any) -> None:
+    print(event + " " + json.dumps(fields, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
+def _prompt(task: dict[str, Any]) -> str:
     for key in ("prompt", "question", "input", "text"):
-        value = task.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
+        val = task.get(key)
+        if isinstance(val, str) and val.strip():
+            return val
     return ""
 
 
-async def _call(
-    task_id: str,
-    category: str,
-    model: str,
-    messages: list[dict[str, str]],
-    max_tokens: int,
-) -> str:
+async def try_complete(task_id: str, category: str, model: str, messages: list[dict[str, str]], max_tokens: int) -> str:
     try:
-        answer, usage = await client.complete(model, category, messages, max_tokens)
-        _USAGE.append({"task_id": task_id, "category": category, "model": model, **usage})
-        _log("USAGE", task_id=task_id, category=category, model=model, **usage)
-        return answer
-    except Exception as error:
-        _log("CALL_ERROR", task_id=task_id, category=category, model=model, error=str(error)[:240])
+        text, usage = await client.complete(model, messages, max_tokens)
+        CALL_LOG.append({"task_id": task_id, "category": category, "model": model, **usage})
+        log("USAGE", task_id=task_id, category=category, model=model, **usage)
+        return text
+    except Exception as err:
+        log("ERROR", task_id=task_id, category=category, model=model, error=str(err)[:220])
         return ""
 
 
-async def _solve(
-    task: dict[str, Any],
-    plan: models.ModelPlan,
-    semaphore: asyncio.Semaphore,
-    results: dict[str, str],
-) -> None:
+async def classify_by_llm(task_id: str, prompt: str, plan: models.ModelPlan) -> str:
+    text = await try_complete(task_id, "router", plan.SMALL, router.fallback_messages(prompt), max_tokens=2)
+    return router.parse_fallback_letter(text)
+
+
+async def solve_task(task: dict[str, Any], plan: models.ModelPlan, sem: asyncio.Semaphore, results: dict[str, str]) -> None:
     task_id = str(task.get("task_id", ""))
-    prompt = _task_prompt(task)
+    prompt = _prompt(task)
     if not prompt:
         results[task_id] = ""
         return
 
     category = router.classify(prompt)
+    if category is None and ENABLE_LLM_ROUTE_FALLBACK:
+        category = await classify_by_llm(task_id, prompt, plan)
+    category = category or "factual"
 
     if ENABLE_LOCAL:
-        local_answer = local.solve(category, prompt)
-        if local_answer is not None:
-            results[task_id] = local_answer
-            _log("LOCAL", task_id=task_id, category=category)
+        local = solvers.solve(category, prompt)
+        if local:
+            log("LOCAL", task_id=task_id, category=category)
+            results[task_id] = local
             return
 
     messages, max_tokens = prompts.render(category, prompt)
-    primary = models.primary_for(category, plan)
-
-    async with semaphore:
-        answer = await _call(task_id, category, primary, messages, max_tokens)
+    primary = models.model_for(category, plan)
+    async with sem:
+        answer = await try_complete(task_id, category, primary, messages, max_tokens)
         if not answer.strip():
-            fallback = models.fallback_for(category, plan)
-            if fallback != primary:
-                answer = await _call(task_id, category + ":fallback", fallback, messages, max_tokens)
-
+            backup = models.fallback_model(category, plan)
+            answer = await try_complete(task_id, category + ":fallback", backup, messages, max_tokens)
     results[task_id] = prompts.postprocess(category, answer)
 
 
-async def _run(tasks: list[dict[str, Any]], results: dict[str, str]) -> models.ModelPlan:
+async def run(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
     plan = models.build_plan()
-    _log("MODEL_PLAN", **plan.as_dict(), enable_gemma=os.environ.get("ENABLE_GEMMA", "0"))
-    semaphore = asyncio.Semaphore(CONCURRENCY)
-    jobs = [_solve(task, plan, semaphore, results) for task in tasks]
-    remaining = max(5.0, DEADLINE_SECONDS - (time.monotonic() - _STARTED))
+    MODEL_PLAN.update(plan.as_dict())
+    log("MODEL_PLAN", **MODEL_PLAN, enable_gemma=os.environ.get("ENABLE_GEMMA", "0"))
+    sem = asyncio.Semaphore(max(1, min(CONCURRENCY, 8)))
+    jobs = [solve_task(t, plan, sem, results) for t in tasks]
+    remaining = DEADLINE_SECONDS - (time.monotonic() - START)
     try:
-        await asyncio.wait_for(asyncio.gather(*jobs, return_exceptions=True), timeout=remaining)
+        await asyncio.wait_for(asyncio.gather(*jobs, return_exceptions=True), timeout=max(5, remaining))
     except asyncio.TimeoutError:
-        _log("DEADLINE", elapsed_seconds=round(time.monotonic() - _STARTED, 2))
+        log("DEADLINE", elapsed=round(time.monotonic() - START, 1))
     finally:
-        await client.close()
-    return plan
+        await client.aclose()
 
 
-def _write_results(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
-    directory = os.path.dirname(OUTPUT_PATH)
-    if directory:
-        os.makedirs(directory, exist_ok=True)
-    payload = [
-        {"task_id": task["task_id"], "answer": str(results.get(str(task["task_id"]), "")).strip()}
-        for task in tasks
-    ]
-    temporary = OUTPUT_PATH + ".tmp"
-    with open(temporary, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-    os.replace(temporary, OUTPUT_PATH)
+def write_results(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
+    out_dir = os.path.dirname(OUTPUT_PATH)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    payload = [{"task_id": t["task_id"], "answer": str(results.get(str(t["task_id"]), "")).strip()} for t in tasks]
+    tmp = OUTPUT_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
+    os.replace(tmp, OUTPUT_PATH)
 
 
-def _write_usage(plan: models.ModelPlan) -> None:
+def write_usage_log() -> None:
     try:
-        output_dir = os.path.dirname(OUTPUT_PATH) or "."
         totals = {
-            "prompt_tokens": sum(item["prompt_tokens"] for item in _USAGE),
-            "completion_tokens": sum(item["completion_tokens"] for item in _USAGE),
-            "total_tokens": sum(item["prompt_tokens"] + item["completion_tokens"] for item in _USAGE),
-            "calls": len(_USAGE),
+            "prompt_tokens": sum(int(c.get("prompt_tokens", 0)) for c in CALL_LOG),
+            "completion_tokens": sum(int(c.get("completion_tokens", 0)) for c in CALL_LOG),
+            "total_tokens": sum(int(c.get("prompt_tokens", 0)) + int(c.get("completion_tokens", 0)) for c in CALL_LOG),
+            "calls": len(CALL_LOG),
         }
-        with open(os.path.join(output_dir, "model_usage.json"), "w", encoding="utf-8") as handle:
-            json.dump({"model_plan": plan.as_dict(), "calls": _USAGE, "totals": totals}, handle, indent=2)
-    except Exception as error:
-        _log("USAGE_LOG_ERROR", error=str(error)[:180])
+        path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, f, ensure_ascii=False, indent=2)
+    except Exception as err:
+        log("WARN", error=str(err)[:180])
 
 
 def main() -> int:
     try:
-        with open(INPUT_PATH, encoding="utf-8-sig") as handle:
-            raw = json.load(handle)
+        with open(INPUT_PATH, encoding="utf-8-sig") as f:
+            raw = json.load(f)
         if not isinstance(raw, list):
-            raise ValueError("/input/tasks.json must contain a JSON list")
-
-        tasks = [item for item in raw if isinstance(item, dict) and item.get("task_id")]
-        required = ("FIREWORKS_API_KEY", "FIREWORKS_BASE_URL", "ALLOWED_MODELS")
-        missing = [name for name in required if not os.environ.get(name)]
-        if missing:
-            raise ValueError("Missing environment variables: " + ", ".join(missing))
-
-        results = {str(task["task_id"]): "" for task in tasks}
-        plan = asyncio.run(_run(tasks, results))
-        _write_results(tasks, results)
-        _write_usage(plan)
-        _log(
-            "DONE",
-            tasks=len(tasks),
-            answered=sum(bool(answer) for answer in results.values()),
-            elapsed_seconds=round(time.monotonic() - _STARTED, 2),
-        )
+            raise ValueError("tasks.json must be a list")
+        tasks = [t for t in raw if isinstance(t, dict) and t.get("task_id")]
+        if not os.environ.get("FIREWORKS_API_KEY") or not os.environ.get("FIREWORKS_BASE_URL") or not os.environ.get("ALLOWED_MODELS"):
+            raise ValueError("FIREWORKS_API_KEY, FIREWORKS_BASE_URL, and ALLOWED_MODELS are required")
+        results = {str(t["task_id"]): "" for t in tasks}
+        asyncio.run(run(tasks, results))
+        write_results(tasks, results)
+        write_usage_log()
+        log("DONE", tasks=len(tasks), answered=sum(1 for v in results.values() if v), elapsed_s=round(time.monotonic() - START, 1))
         return 0
-    except Exception as error:
-        _log("FATAL", error=str(error)[:300])
+    except Exception as err:
+        log("FATAL", error=str(err)[:300])
         return 1
 
 

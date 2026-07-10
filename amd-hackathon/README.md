@@ -1,45 +1,34 @@
-# Brocacho Precision Router V14
+# Track 1 No-Paid-Gemma Router V12
 
-A lightweight Track 1 agent designed for high accuracy with low Fireworks token use.
+This version is designed for teams that do **not** want to pay for on-demand Gemma deployment.
 
 ## Strategy
 
-- One remote call per non-local task.
-- A fallback call occurs only after a failed or empty primary response.
-- Only pure arithmetic and fully parsed percentage inventory problems are solved locally.
-- The strongest allowed instruction model handles language tasks.
-- A strong reasoning model handles math and logic.
-- A dedicated coder handles debugging and code generation.
-- Gemma is disabled by default, so no paid on-demand deployment is required.
-
-## Required runtime contract
-
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
-- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
-- Uses only model IDs supplied through `ALLOWED_MODELS`
+- Uses only `ALLOWED_MODELS`
+- Does **not** select Gemma by default (`ENABLE_GEMMA=0`)
+- Uses narrow local solvers for simple math/sentiment/logic to save tokens
+- Uses one Fireworks call per unsolved task, with fallback only if the first call fails/returns empty
 
-## Model reporting
+## Model plan
 
-The container prints `MODEL_PLAN` to stderr and writes `/output/model_usage.json`.
-The exact model IDs depend on the evaluator's `ALLOWED_MODELS` value.
+The actual model names depend on `ALLOWED_MODELS` at runtime. The code logs them to stderr as `MODEL_PLAN` and writes `/output/model_usage.json`.
 
-## Local test
+Default routing:
 
-```bash
-pip install -r requirements.txt
-python test_agent.py
+- `sentiment` -> SMALL capable non-Gemma chat model
+- `factual`, `summary`, `NER` -> LANGUAGE model, preferring Qwen / GLM / GPT-OSS / DeepSeek / Minimax
+- `math`, `logic` -> REASON model, preferring Minimax / DeepSeek / Qwen / GLM / GPT-OSS
+- `debug`, `codegen` -> CODE model, preferring Kimi / coder / code models
+
+## Recommended environment
+
+```text
+ENABLE_GEMMA=0
+ENABLE_LOCAL=1
+CONCURRENCY=4
+REASONING_EFFORT=none
 ```
 
-## Docker test
-
-```bash
-docker build --platform linux/amd64 -t track1-v14 .
-docker run --rm \
-  -e FIREWORKS_API_KEY=dummy \
-  -e FIREWORKS_BASE_URL=https://example.invalid/v1 \
-  -e ALLOWED_MODELS=accounts/fireworks/models/gpt-oss-120b \
-  -v "$PWD/input:/input" \
-  -v "$PWD/output:/output" \
-  track1-v14
-```
+Only set `ENABLE_GEMMA=1` if your team has already deployed Gemma and it appears in `ALLOWED_MODELS`.
