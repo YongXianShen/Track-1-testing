@@ -1,40 +1,68 @@
-# Track 1 Stable Precision Router V15
+# Track 1 V16 — Local Zero-Token Router
 
-This version is built directly from the proven V12 baseline. It keeps the same no-paid-deployment model plan and changes only conservative, testable areas.
+A fully local Track 1 agent. It makes **zero calls** to `FIREWORKS_BASE_URL`, so its recorded Fireworks token usage is zero.
 
-## What changed from V12
+## Model
 
-- fixes code-generation prompts that mention **error handling** being misrouted as debugging;
-- recognizes sentiment prompts such as **positive or negative**;
-- avoids treating ordinary factual uses of **order** as logic puzzles;
-- handles negation in the zero-token sentiment solver (`not good`, `not bad`);
-- keeps factual answers complete (`under 120 words`);
-- applies adaptive output caps for exact-length summaries;
-- reduces code-generation cap from 620 to 520 tokens;
-- still uses one Fireworks call per unsolved task and retries only after an empty/failed response.
+Default bundled model:
 
-## Cost
+- **Qwen3.5-2B**, `Q4_K_M` GGUF quantization
+- Runtime: official `llama.cpp` server
+- Model is downloaded while the Docker image is built and stored inside the image
+- No paid deployment, personal API key, Ollama, or network access is required at evaluation time
 
-No Gemma deployment, local LLM, paid endpoint, or personal API key is required. The evaluation harness supplies `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`.
+Qwen3.5-2B was chosen over a 3B–4B model because the grader has only 4 GB RAM, 2 vCPU, and a 10-minute limit. The 4-bit model leaves more memory and time for the agent while still supporting all eight task categories.
 
-## Required contract
-
-- read `/input/tasks.json`;
-- write `/output/results.json`;
-- use only models in `ALLOWED_MODELS`;
-- route every Fireworks call through `FIREWORKS_BASE_URL`.
-
-## Recommended environment
+## Pipeline
 
 ```text
-ENABLE_GEMMA=0
-ENABLE_LOCAL=1
-CONCURRENCY=4
-REASONING_EFFORT=none
+/input/tasks.json
+      ↓
+regex category router
+      ↓
+high-confidence exact solver ── yes → answer locally
+      ↓ no
+bundled Qwen3.5-2B via llama.cpp
+      ↓
+format validation / short reasoning check
+      ↓
+/output/results.json
 ```
 
-## Test
+## Build
 
 ```bash
-python test_agent.py
+docker build --platform linux/amd64 -t track1-local-v16 .
 ```
+
+The build downloads about 1.3 GB of model weights. The final image remains below the hackathon's 10 GB compressed limit.
+
+## Local test
+
+```bash
+python3 test_agent.py
+mkdir -p input output
+# place tasks at input/tasks.json
+docker run --rm \
+  -v "$PWD/input:/input:ro" \
+  -v "$PWD/output:/output" \
+  track1-local-v16
+```
+
+## Output
+
+```json
+[
+  {"task_id":"t1","answer":"..."}
+]
+```
+
+`/output/model_usage.json` records:
+
+```json
+{"fireworks_calls":0,"fireworks_tokens":0,"local_model":"Qwen3.5-2B-Q4_K_M"}
+```
+
+## Important
+
+A 100% score cannot be guaranteed because the 19 evaluation tasks are hidden and the LLM judge is not perfectly deterministic. This version is designed for zero scored tokens and broad capability; it does not contain hidden answers or hardcoded evaluation data.

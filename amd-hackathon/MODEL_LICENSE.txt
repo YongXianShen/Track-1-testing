@@ -1,0 +1,4 @@
+The bundled default model is derived from Qwen/Qwen3.5-2B and distributed under the Apache License 2.0.
+Quantized GGUF source: unsloth/Qwen3.5-2B-GGUF.
+llama.cpp is distributed under the MIT License.
+Review the upstream model and runtime repositories for complete license texts and notices.
