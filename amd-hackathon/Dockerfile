@@ -5,12 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-COPY main.py .
-
+COPY src ./src
 RUN mkdir -p /input /output
-
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python", "-m", "src.main"]

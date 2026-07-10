@@ -1,47 +1,20 @@
-# AMD Hackathon Track 1 Agent
+# Track 1 Gemma-aware Hybrid Router V11
 
-V7 is based on the most stable Fireworks-first version, with a few conservative local deterministic solvers for simple arithmetic, clear sentiment, and exact simple code/logic patterns.
+This version is based on the stable tiered-router approach:
 
-## Contract
+- `/input/tasks.json` -> `/output/results.json`
+- reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, `ALLOWED_MODELS`
+- uses Gemma only when it appears in `ALLOWED_MODELS`
+- prefers Gemma for sentiment, summary, and NER; uses strong general models for factual/math/logic and code models for debug/codegen
+- includes narrow zero-token local solvers for very simple math/sentiment/logic tasks
 
-- Reads tasks from `/input/tasks.json`
-- Writes results to `/output/results.json`
-- Output schema: `[ { "task_id": ..., "answer": "..." } ]`
-- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` from the runtime environment
-- Calls only models listed in `ALLOWED_MODELS`
+Recommended submission environment defaults:
 
-## Useful environment knobs
-
-Defaults are safe for hidden evaluation:
-
-```bash
-ENABLE_SAFE_LOCAL=1
-ENABLE_REVIEW_PASS=0
-MODEL_STRATEGY=stable
-MAX_CONCURRENCY=2
+```text
+REASONING_EFFORT=none
+ENABLE_LOCAL=1
+CONCURRENCY=5
+GEMMA_FACTUAL=0
 ```
 
-If score drops, try the safest Fireworks-only mode by setting:
-
-```bash
-ENABLE_SAFE_LOCAL=0
-MODEL_STRATEGY=stable
-```
-
-If model ranking seems bad, try:
-
-```bash
-MODEL_STRATEGY=first
-```
-
-## Docker image
-
-Build linux/amd64 and push to GHCR, for example:
-
-```bash
-docker buildx build --platform linux/amd64 -t ghcr.io/yongxianshen/track-1-testing:latest --push .
-```
-
-
-## V10 note
-This version keeps the V7 stable runtime, but prefers deployed Gemma models only for factual, summarisation, NER, and sentiment tasks when Gemma appears in `ALLOWED_MODELS`. Math, logic, debugging, and code generation keep the V7 ranking.
+Turn on `GEMMA_FACTUAL=1` only if the deployed Gemma model is strong, e.g. a 25B+ model, and the last run suggests factual tasks are failing.
