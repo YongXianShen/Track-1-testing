@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -17,7 +18,9 @@ class LocalRuntime:
         self.port = int(os.environ.get("LOCAL_LLM_PORT", "8080"))
         self.base = f"http://{self.host}:{self.port}"
         self.model_path = os.environ.get("LOCAL_MODEL_PATH", "/models/model.gguf")
-        self.server_bin = os.environ.get("LLAMA_SERVER_BIN", "/app/llama-server")
+        configured = os.environ.get("LLAMA_SERVER_BIN", "").strip()
+        candidates = [configured, "/app/llama-server", "/usr/local/bin/llama-server", shutil.which("llama-server") or ""]
+        self.server_bin = next((item for item in candidates if item and Path(item).is_file()), "")
         self.threads = max(1, int(os.environ.get("LOCAL_THREADS", "2")))
         self.context = max(2048, int(os.environ.get("LOCAL_CONTEXT", "4096")))
         self.process: subprocess.Popen[bytes] | None = None
@@ -26,6 +29,8 @@ class LocalRuntime:
     def start(self, timeout: float = 150.0) -> None:
         if not Path(self.model_path).is_file():
             raise FileNotFoundError(f"Bundled model missing: {self.model_path}")
+        if not self.server_bin:
+            raise FileNotFoundError("llama-server binary was not found")
         self.log_file = open("/tmp/llama-server.log", "wb")
         command = [
             self.server_bin,
@@ -35,9 +40,13 @@ class LocalRuntime:
             "--ctx-size", str(self.context),
             "--threads", str(self.threads),
             "--threads-batch", str(self.threads),
-            "--batch-size", "128",
-            "--ubatch-size", "64",
+            "--batch-size", "64",
+            "--ubatch-size", "32",
             "--parallel", "1",
+            "--no-warmup",
+            "--jinja",
+            "--cache-type-k", "q8_0",
+            "--cache-type-v", "q8_0",
         ]
         self.process = subprocess.Popen(command, stdout=self.log_file, stderr=subprocess.STDOUT)
         deadline = time.monotonic() + timeout
@@ -52,7 +61,16 @@ class LocalRuntime:
             except Exception as exc:  # server is still loading
                 last_error = str(exc)
             time.sleep(1)
-        raise TimeoutError(f"Local model did not become ready: {last_error}")
+        raise TimeoutError(f"Local model did not become ready: {last_error}; log={self.read_log_tail()}")
+
+    def read_log_tail(self, limit: int = 4000) -> str:
+        try:
+            if self.log_file:
+                self.log_file.flush()
+            data = Path("/tmp/llama-server.log").read_text(encoding="utf-8", errors="replace")
+            return data[-limit:]
+        except Exception:
+            return ""
 
     def complete(self, messages: list[dict[str, str]], max_tokens: int, timeout: float = 80.0) -> str:
         payload: dict[str, Any] = {

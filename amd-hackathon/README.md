@@ -1,4 +1,4 @@
-# Track 1 V16 — Local Zero-Token Router
+# Track 1 V16.1 — Runtime-Safe Local Zero-Token Router
 
 A fully local Track 1 agent. It makes **zero calls** to `FIREWORKS_BASE_URL`, so its recorded Fireworks token usage is zero.
 
@@ -6,12 +6,12 @@ A fully local Track 1 agent. It makes **zero calls** to `FIREWORKS_BASE_URL`, so
 
 Default bundled model:
 
-- **Qwen3.5-2B**, `Q4_K_M` GGUF quantization
+- **Qwen3-1.7B**, `Q4_K_M` GGUF quantization
 - Runtime: official `llama.cpp` server
 - Model is downloaded while the Docker image is built and stored inside the image
 - No paid deployment, personal API key, Ollama, or network access is required at evaluation time
 
-Qwen3.5-2B was chosen over a 3B–4B model because the grader has only 4 GB RAM, 2 vCPU, and a 10-minute limit. The 4-bit model leaves more memory and time for the agent while still supporting all eight task categories.
+Qwen3-1.7B was chosen because it is smaller and more mature in llama.cpp than Qwen3.5-2B because the grader has only 4 GB RAM, 2 vCPU, and a 10-minute limit. The 4-bit model leaves more memory and time for the agent while still supporting all eight task categories.
 
 ## Pipeline
 
@@ -66,3 +66,14 @@ docker run --rm \
 ## Important
 
 A 100% score cannot be guaranteed because the 19 evaluation tasks are hidden and the LLM judge is not perfectly deterministic. This version is designed for zero scored tokens and broad capability; it does not contain hidden answers or hardcoded evaluation data.
+
+
+## Runtime safety changes
+
+- Uses Qwen3-1.7B Q4_K_M instead of Qwen3.5-2B.
+- Reduces context to 2048 and batch sizes to 64/32.
+- Disables startup warmup and the second reasoning pass by default.
+- Locates `llama-server` robustly.
+- Writes `/output/runtime_diagnostic.json` and exits cleanly if model startup fails.
+
+Before publishing, run the 4 GB / 2 CPU smoke test shown in `smoke-test.ps1`.

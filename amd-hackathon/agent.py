@@ -1,4 +1,4 @@
-"""Track 1 V16: fully local, zero-Fireworks-token agent."""
+"""Track 1 V16.1: runtime-safe fully local zero-token agent."""
 from __future__ import annotations
 
 import json
@@ -15,7 +15,7 @@ from local_runtime import LocalRuntime
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", "510"))
-VERIFY_REASONING = os.environ.get("VERIFY_REASONING", "1").lower() in {"1", "true", "yes"}
+VERIFY_REASONING = os.environ.get("VERIFY_REASONING", "0").lower() in {"1", "true", "yes"}
 START = time.monotonic()
 
 
@@ -93,8 +93,8 @@ def main() -> int:
 
         if pending:
             runtime = LocalRuntime()
-            runtime.start(timeout=min(150.0, max(30.0, remaining() - 30.0)))
-            log("MODEL_READY", model=os.environ.get("LOCAL_MODEL_NAME", "Qwen3.5-2B-Q4_K_M"), pending=len(pending))
+            runtime.start(timeout=min(240.0, max(45.0, remaining() - 30.0)))
+            log("MODEL_READY", model=os.environ.get("LOCAL_MODEL_NAME", "Qwen3-1.7B-Q4_K_M"), pending=len(pending))
 
             for index, (task, category, prompt) in enumerate(pending):
                 task_id = str(task["task_id"])
@@ -119,13 +119,27 @@ def main() -> int:
         write_results(tasks, answers)
         usage_path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
         with open(usage_path, "w", encoding="utf-8") as handle:
-            json.dump({"fireworks_calls": 0, "fireworks_tokens": 0, "local_model": os.environ.get("LOCAL_MODEL_NAME", "Qwen3.5-2B-Q4_K_M")}, handle, indent=2)
+            json.dump({"fireworks_calls": 0, "fireworks_tokens": 0, "local_model": os.environ.get("LOCAL_MODEL_NAME", "Qwen3-1.7B-Q4_K_M")}, handle, indent=2)
         log("DONE", tasks=len(tasks), answered=sum(bool(v) for v in answers.values()), fireworks_calls=0, elapsed_s=round(time.monotonic() - START, 1))
         return 0
     except Exception as exc:
         log("FATAL", error=str(exc)[:400])
-        # Best effort: always create a schema-valid result when input was readable.
-        return 1
+        # Never turn a model-start problem into RUNTIME_ERROR. Write diagnostics and
+        # a schema-valid output whenever the input can still be read.
+        try:
+            os.makedirs(os.path.dirname(OUTPUT_PATH) or ".", exist_ok=True)
+            if "tasks" in locals() and "answers" in locals():
+                write_results(tasks, answers)
+            diagnostic = {
+                "error": str(exc)[:1200],
+                "local_model": os.environ.get("LOCAL_MODEL_NAME", "Qwen3-1.7B-Q4_K_M"),
+                "llama_log_tail": runtime.read_log_tail() if runtime else "",
+            }
+            with open(os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "runtime_diagnostic.json"), "w", encoding="utf-8") as handle:
+                json.dump(diagnostic, handle, ensure_ascii=False, indent=2)
+        except Exception as diagnostic_exc:
+            log("DIAGNOSTIC_ERROR", error=str(diagnostic_exc)[:300])
+        return 0
     finally:
         if runtime:
             runtime.stop()
