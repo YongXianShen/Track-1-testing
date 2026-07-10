@@ -54,20 +54,55 @@ def solve_math(prompt: str) -> str | None:
 
 
 def solve_sentiment(prompt: str) -> str | None:
-    if not re.search(r"sentiment|review|feedback|positive|negative|neutral|mixed", prompt, re.I):
+    """Handle only high-confidence standard-label sentiment locally.
+
+    Negation is applied within a short window, so phrases such as "not good"
+    and "not bad" are not reversed. Ambiguous/sarcastic or custom-label tasks
+    are left to the API model.
+    """
+    if not re.search(r"sentiment|review|feedback|positive|negative|neutral|mixed|polarity", prompt, re.I):
         return None
+    if re.search(r"sarcasm|sarcastic|irony|ironic", prompt, re.I):
+        return None
+    # Avoid returning the standard labels when the task explicitly defines a
+    # different label set.
+    if re.search(r"(?:use|choose from|labels? are)\s*[:=-]?\s*(?!positive|negative|neutral|mixed)[A-Za-z]", prompt, re.I):
+        return None
+
     text = re.split(r"review\s*[:\-]|feedback\s*[:\-]|text\s*[:\-]", prompt, flags=re.I)[-1].lower()
-    pos_words = {"amazing","awesome","excellent","fantastic","fast","good","great","happy","impressive","love","loved","perfect","reliable","smooth","wonderful","best","useful","easy"}
-    neg_words = {"awful","bad","broken","confusing","crash","crashes","disappointed","hate","hated","poor","scratch","scratches","slow","terrible","worst","buggy","late","difficult"}
-    pos = sum(1 for w in pos_words if re.search(rf"\b{re.escape(w)}\b", text))
-    neg = sum(1 for w in neg_words if re.search(rf"\b{re.escape(w)}\b", text))
+    words = re.findall(r"[a-z]+(?:n't)?", text)
+    positive = {
+        "amazing", "awesome", "excellent", "fantastic", "fast", "good", "great",
+        "happy", "impressive", "love", "loved", "perfect", "reliable", "smooth",
+        "wonderful", "best", "useful", "easy", "pleased", "satisfied", "recommend",
+    }
+    negative = {
+        "awful", "bad", "broken", "confusing", "crash", "crashes", "disappointed",
+        "hate", "hated", "poor", "scratch", "scratches", "slow", "terrible", "worst",
+        "buggy", "late", "difficult", "frustrating", "annoying", "unreliable",
+    }
+    negators = {"not", "never", "no", "hardly", "isn't", "wasn't", "weren't", "doesn't", "didn't"}
+
+    pos = neg = 0
+    for i, word in enumerate(words):
+        polarity = 1 if word in positive else -1 if word in negative else 0
+        if not polarity:
+            continue
+        window = words[max(0, i - 3):i]
+        if any(w in negators or w.endswith("n't") for w in window):
+            polarity *= -1
+        if polarity > 0:
+            pos += 1
+        else:
+            neg += 1
+
     if pos and neg:
         return "Mixed — it contains both positive and negative points."
-    if pos and not neg:
+    if pos:
         return "Positive — it expresses approval or satisfaction."
-    if neg and not pos:
+    if neg:
         return "Negative — it expresses criticism or dissatisfaction."
-    if re.search(r"\b(okay|fine|average|ordinary|nothing special|acceptable)\b", text):
+    if re.search(r"\b(okay|fine|average|ordinary|nothing special|acceptable|neutral)\b", text):
         return "Neutral — it is neither strongly positive nor negative."
     return None
 

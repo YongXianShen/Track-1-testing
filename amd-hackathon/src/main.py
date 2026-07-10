@@ -1,6 +1,7 @@
-"""Track 1 no-paid-Gemma hybrid router V12.
+"""Track 1 stable precision router V15.
 
-Goal: higher accuracy with low tokens, without requiring paid on-demand Gemma deployment.
+Built directly from the proven V12 baseline. It requires no paid deployment and
+keeps the same model plan while fixing high-risk routing and local-sentiment cases.
 """
 from __future__ import annotations
 
@@ -118,7 +119,7 @@ def write_usage_log() -> None:
         }
         path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, f, ensure_ascii=False, indent=2)
+            json.dump({"version": "v15-stable-precision", "model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, f, ensure_ascii=False, indent=2)
     except Exception as err:
         log("WARN", error=str(err)[:180])
 

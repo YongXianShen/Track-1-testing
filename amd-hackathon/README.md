@@ -1,26 +1,28 @@
-# Track 1 No-Paid-Gemma Router V12
+# Track 1 Stable Precision Router V15
 
-This version is designed for teams that do **not** want to pay for on-demand Gemma deployment.
+This version is built directly from the proven V12 baseline. It keeps the same no-paid-deployment model plan and changes only conservative, testable areas.
 
-## Strategy
+## What changed from V12
 
-- Reads `/input/tasks.json`
-- Writes `/output/results.json`
-- Uses only `ALLOWED_MODELS`
-- Does **not** select Gemma by default (`ENABLE_GEMMA=0`)
-- Uses narrow local solvers for simple math/sentiment/logic to save tokens
-- Uses one Fireworks call per unsolved task, with fallback only if the first call fails/returns empty
+- fixes code-generation prompts that mention **error handling** being misrouted as debugging;
+- recognizes sentiment prompts such as **positive or negative**;
+- avoids treating ordinary factual uses of **order** as logic puzzles;
+- handles negation in the zero-token sentiment solver (`not good`, `not bad`);
+- keeps factual answers complete (`under 120 words`);
+- applies adaptive output caps for exact-length summaries;
+- reduces code-generation cap from 620 to 520 tokens;
+- still uses one Fireworks call per unsolved task and retries only after an empty/failed response.
 
-## Model plan
+## Cost
 
-The actual model names depend on `ALLOWED_MODELS` at runtime. The code logs them to stderr as `MODEL_PLAN` and writes `/output/model_usage.json`.
+No Gemma deployment, local LLM, paid endpoint, or personal API key is required. The evaluation harness supplies `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`.
 
-Default routing:
+## Required contract
 
-- `sentiment` -> SMALL capable non-Gemma chat model
-- `factual`, `summary`, `NER` -> LANGUAGE model, preferring Qwen / GLM / GPT-OSS / DeepSeek / Minimax
-- `math`, `logic` -> REASON model, preferring Minimax / DeepSeek / Qwen / GLM / GPT-OSS
-- `debug`, `codegen` -> CODE model, preferring Kimi / coder / code models
+- read `/input/tasks.json`;
+- write `/output/results.json`;
+- use only models in `ALLOWED_MODELS`;
+- route every Fireworks call through `FIREWORKS_BASE_URL`.
 
 ## Recommended environment
 
@@ -31,4 +33,8 @@ CONCURRENCY=4
 REASONING_EFFORT=none
 ```
 
-Only set `ENABLE_GEMMA=1` if your team has already deployed Gemma and it appears in `ALLOWED_MODELS`.
+## Test
+
+```bash
+python test_agent.py
+```
