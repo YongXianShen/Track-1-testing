@@ -1,8 +1,8 @@
-"""No-paid-deploy model selection for Track 1.
+"""Model selection optimized for benchmark accuracy, not dollar price.
 
-Gemma is deliberately disabled by default because it may require on-demand deployment.
-The router only selects models from ALLOWED_MODELS and avoids model families that may
-404 or violate the task, unless ENABLE_GEMMA=1 is set explicitly.
+Track 1 ranks by token count, not model size or API price. Therefore easy tasks
+still use the strongest concise instruction model; code tasks use the strongest
+coder. Gemma is excluded by default because it may require paid deployment.
 """
 from __future__ import annotations
 
@@ -10,155 +10,130 @@ import os
 import re
 from dataclasses import dataclass
 
-BAD_RX = re.compile(r"embed|embedding|rerank|image|vision|audio|whisper|tts|guard|moderation|diffusion|flux|sdxl", re.I)
-GEMMA_RX = re.compile(r"gemma", re.I)
-CODE_RX = re.compile(r"code|coder|kimi", re.I)
-REASON_RX = re.compile(r"\br1\b|qwq|reason|thinking|think|deepthink", re.I)
-INSTRUCT_RX = re.compile(r"instruct|chat|it|assistant|turbo", re.I)
-SIZE_RX = re.compile(r"(\d+(?:\.\d+|p\d+)?)\s*b\b", re.I)
-MOE_RX = re.compile(r"(\d+)\s*x\s*(\d+)b\b", re.I)
+_UNSUITABLE = re.compile(
+    r"embed|embedding|rerank|image|vision|audio|whisper|tts|guard|moderation|"
+    r"diffusion|flux|sdxl",
+    re.I,
+)
+_GEMMA = re.compile(r"gemma", re.I)
+_CODE = re.compile(r"coder|code|kimi", re.I)
+_REASONING_ONLY = re.compile(r"\br1\b|qwq|deepthink|reasoning-only", re.I)
+_SIZE = re.compile(r"(?<!\d)(\d+(?:[._p]\d+)?)\s*b(?![a-z])", re.I)
 
-UNKNOWN_SIZE = 12.0
 
 @dataclass(frozen=True)
 class ModelPlan:
-    SMALL: str
-    LANGUAGE: str
+    GENERAL: str
     REASON: str
     CODE: str
-    FALLBACK: str
+    BACKUP: str
 
     def as_dict(self) -> dict[str, str]:
         return {
-            "SMALL": self.SMALL,
-            "LANGUAGE": self.LANGUAGE,
+            "GENERAL": self.GENERAL,
             "REASON": self.REASON,
             "CODE": self.CODE,
-            "FALLBACK": self.FALLBACK,
+            "BACKUP": self.BACKUP,
         }
 
 
-def allowed_models() -> list[str]:
-    raw = os.environ.get("ALLOWED_MODELS", "")
-    models = [m.strip() for m in raw.split(",") if m.strip()]
-    if not models:
+def _allowed() -> list[str]:
+    raw = [item.strip() for item in os.environ.get("ALLOWED_MODELS", "").split(",") if item.strip()]
+    if not raw:
         raise ValueError("ALLOWED_MODELS is empty")
-    enable_gemma = os.environ.get("ENABLE_GEMMA", "0").strip().lower() in {"1", "true", "yes"}
-    usable: list[str] = []
-    for m in models:
-        if BAD_RX.search(m):
-            continue
-        if GEMMA_RX.search(m) and not enable_gemma:
-            continue
-        usable.append(m)
-    return usable or [m for m in models if not BAD_RX.search(m)] or models
+    allow_gemma = os.environ.get("ENABLE_GEMMA", "0").lower() in {"1", "true", "yes"}
+    filtered = [
+        model for model in raw
+        if not _UNSUITABLE.search(model) and (allow_gemma or not _GEMMA.search(model))
+    ]
+    return filtered or [m for m in raw if not _UNSUITABLE.search(m)] or raw
 
 
-def size_b(model_id: str) -> float:
-    s = model_id.lower().replace("_", "-")
-    moe = MOE_RX.findall(s)
-    if moe:
-        return max(float(a) * float(b) for a, b in moe)
-    found = []
-    for x in SIZE_RX.findall(s):
+def _size(model: str) -> float:
+    values: list[float] = []
+    for raw in _SIZE.findall(model.lower().replace("-", "_")):
         try:
-            found.append(float(x.replace("p", ".")))
-        except Exception:
+            values.append(float(raw.replace("_", ".").replace("p", ".")))
+        except ValueError:
             pass
-    return max(found) if found else UNKNOWN_SIZE
+    return max(values, default=0.0)
 
 
-def _family_score(m: str, category: str) -> int:
-    t = m.lower()
-    score = 0
+def _quality(model: str, role: str) -> int:
+    name = model.lower()
+    score = min(int(_size(model) * 2), 500)
 
-    # General safety and quality signals.
-    score += min(int(size_b(m) * 6), 900)
-    if INSTRUCT_RX.search(t):
-        score += 70
-    if REASON_RX.search(t) and category not in {"math", "logic"}:
-        score -= 120
+    # Prefer instruction/chat variants and avoid verbose reasoning-only variants.
+    if re.search(r"instruct|chat|assistant|turbo|plus|pro", name):
+        score += 90
+    if _REASONING_ONLY.search(name):
+        score -= 250
 
-    # Category-specific family ranking. These are soft preferences; the allowed
-    # list is still the source of truth.
-    if category in {"debug", "codegen"}:
-        if "kimi" in t: score += 1100
-        if "coder" in t: score += 1000
-        if "code" in t: score += 850
-        if "qwen" in t: score += 520
-        if "deepseek" in t: score += 480
-        if "glm" in t: score += 360
-        if "gpt-oss" in t or "oss" in t: score += 330
-        if not CODE_RX.search(t): score -= 180
-    elif category in {"math", "logic"}:
-        if "minimax" in t or "m3" in t: score += 1050
-        if "deepseek" in t: score += 980
-        if "qwen" in t: score += 900
-        if "glm" in t: score += 850
-        if "gpt-oss" in t or "oss" in t: score += 760
-        if "llama" in t: score += 650
-        if REASON_RX.search(t): score += 450
-        if CODE_RX.search(t): score -= 240
-    elif category in {"factual", "summary", "ner"}:
-        if "qwen" in t: score += 880
-        if "glm" in t: score += 850
-        if "gpt-oss" in t or "oss" in t: score += 830
-        if "deepseek" in t: score += 810
-        if "minimax" in t or "m3" in t: score += 760
-        if "llama" in t: score += 720
-        if CODE_RX.search(t): score -= 260
-    elif category == "sentiment":
-        # Sentiment is easy; prefer a capable non-code chat model, not necessarily largest.
-        if "qwen" in t: score += 820
-        if "glm" in t: score += 790
-        if "gpt-oss" in t or "oss" in t: score += 760
-        if "minimax" in t or "m3" in t: score += 740
-        if "deepseek" in t: score += 720
-        if CODE_RX.search(t): score -= 260
-        score -= max(int(size_b(m) * 2), 0)  # gently prefer smaller for easy task
-    else:
-        if "qwen" in t or "glm" in t or "deepseek" in t or "gpt-oss" in t: score += 700
+    if role == "code":
+        if "kimi" in name and "code" in name: score += 1800
+        elif "kimi" in name: score += 1550
+        if "coder" in name: score += 1500
+        if re.search(r"(^|[-_/])code($|[-_/])", name): score += 1200
+        if "deepseek" in name: score += 750
+        if "qwen" in name: score += 720
+        if "gpt-oss" in name: score += 680
+        if "glm" in name: score += 640
+    elif role == "reason":
+        if "deepseek" in name and ("v4" in name or "pro" in name): score += 1500
+        elif "deepseek" in name: score += 1300
+        if "qwen3" in name or "qwen-3" in name: score += 1450
+        elif "qwen" in name: score += 1250
+        if "gpt-oss-120b" in name or "gpt_oss_120b" in name: score += 1420
+        elif "gpt-oss" in name: score += 1200
+        if "glm-5" in name or "glm5" in name: score += 1400
+        elif "glm" in name: score += 1220
+        if "minimax" in name: score += 1120
+        if _CODE.search(name): score -= 300
+    else:  # strongest concise general instruction model
+        if "gpt-oss-120b" in name or "gpt_oss_120b" in name: score += 1500
+        elif "gpt-oss" in name: score += 1260
+        if "qwen3" in name or "qwen-3" in name: score += 1460
+        elif "qwen" in name: score += 1240
+        if "glm-5" in name or "glm5" in name: score += 1430
+        elif "glm" in name: score += 1230
+        if "deepseek" in name and ("v4" in name or "pro" in name): score += 1400
+        elif "deepseek" in name: score += 1210
+        if "minimax" in name: score += 1110
+        if "llama-4" in name: score += 1050
+        if _CODE.search(name): score -= 350
 
     return score
 
 
-def best_for(models: list[str], category: str) -> str:
-    return max(models, key=lambda m: (_family_score(m, category), -len(m)))
+def _best(models: list[str], role: str) -> str:
+    return max(models, key=lambda model: (_quality(model, role), -len(model)))
 
 
 def build_plan() -> ModelPlan:
-    models = allowed_models()
-    non_code = [m for m in models if not CODE_RX.search(m)] or models
-    code_models = [m for m in models if CODE_RX.search(m)] or models
+    models = _allowed()
+    non_code = [m for m in models if not _CODE.search(m)] or models
+    code_models = [m for m in models if _CODE.search(m)] or models
 
-    small = best_for(non_code, "sentiment")
-    language = best_for(non_code, "summary")
-    reason = best_for(non_code, "math")
-    code = best_for(code_models, "codegen")
-    fallback = best_for(non_code, "factual")
-    return ModelPlan(SMALL=small, LANGUAGE=language, REASON=reason, CODE=code, FALLBACK=fallback)
+    general = _best(non_code, "general")
+    reason = _best(non_code, "reason")
+    code = _best(code_models, "code")
+
+    remaining = [m for m in non_code if m not in {general, reason}]
+    backup = _best(remaining, "general") if remaining else (reason if reason != general else code)
+    return ModelPlan(general, reason, code, backup)
 
 
-def tier_for(category: str, plan: ModelPlan) -> str:
-    if category == "sentiment":
-        return "SMALL"
-    if category in {"factual", "summary", "ner"}:
-        return "LANGUAGE"
+def primary_for(category: str, plan: ModelPlan) -> str:
     if category in {"math", "logic"}:
-        return "REASON"
+        return plan.REASON
     if category in {"debug", "codegen"}:
-        return "CODE"
-    return "FALLBACK"
+        return plan.CODE
+    return plan.GENERAL
 
 
-def model_for(category: str, plan: ModelPlan) -> str:
-    return getattr(plan, tier_for(category, plan))
-
-
-def fallback_model(category: str, plan: ModelPlan) -> str:
-    primary = model_for(category, plan)
-    order = [plan.FALLBACK, plan.REASON, plan.LANGUAGE, plan.CODE, plan.SMALL]
-    for m in order:
-        if m != primary:
-            return m
+def fallback_for(category: str, plan: ModelPlan) -> str:
+    primary = primary_for(category, plan)
+    for candidate in (plan.BACKUP, plan.GENERAL, plan.REASON, plan.CODE):
+        if candidate != primary:
+            return candidate
     return primary

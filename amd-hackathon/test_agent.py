@@ -1,28 +1,24 @@
-import json, os, pathlib, subprocess, sys, tempfile
+from src import local, prompts, router
 
-practice = [
-    {"task_id":"practice-01","prompt":"What is the capital of Australia, and what body of water is it near?"},
-    {"task_id":"practice-02","prompt":"A store has 240 items. It sells 15% on Monday and 60 more on Tuesday. How many items remain?"},
-    {"task_id":"practice-03","prompt":"Classify the sentiment of this review: The battery life is great, but the screen scratches too easily."},
-]
+PRACTICE = {
+    "factual": "What is the capital of Australia, and what body of water is it near?",
+    "math": "A store has 240 items. It sells 15% on Monday and 60 more on Tuesday. How many items remain?",
+    "sentiment": "Classify the sentiment of this review: The battery life is great, but the screen scratches too easily.",
+    "summary": "Summarize the following in exactly one sentence: A long sample paragraph.",
+    "ner": "Extract all named entities and their types from: Maria Sanchez joined Fireworks AI in Berlin last March.",
+    "debug": "This function should return the max of a list but has a bug: def get_max(nums): return nums[0]. Find and fix it.",
+    "logic": "Three friends each own a different pet. Jo owns the dog. Who owns the cat?",
+    "codegen": "Write a Python function that returns the second-largest number in a list, handling duplicates correctly.",
+}
 
-def test_contract_writes_schema():
-    with tempfile.TemporaryDirectory() as td:
-        inp = pathlib.Path(td)/"tasks.json"
-        out = pathlib.Path(td)/"results.json"
-        inp.write_text(json.dumps(practice), encoding="utf-8")
-        env = os.environ.copy()
-        env.update({
-            "INPUT_PATH": str(inp),
-            "OUTPUT_PATH": str(out),
-            "FIREWORKS_API_KEY": "dummy",
-            "FIREWORKS_BASE_URL": "http://localhost:1/v1",
-            "ALLOWED_MODELS": "accounts/fireworks/models/kimi-k2p7-code,accounts/fireworks/models/minimax-m3,accounts/fireworks/models/qwen3p7-plus,accounts/fireworks/models/gpt-oss-120b",
-            "DEADLINE_SECONDS": "1",
-            "CALL_TIMEOUT_SECONDS": "0.5",
-        })
-        subprocess.run([sys.executable, "-m", "src.main"], cwd=pathlib.Path(__file__).parent, env=env, timeout=8)
-        assert out.exists()
-        data = json.loads(out.read_text())
-        assert len(data) == len(practice)
-        assert all(set(x) == {"task_id", "answer"} for x in data)
+for expected, prompt in PRACTICE.items():
+    actual = router.classify(prompt)
+    assert actual == expected, (expected, actual, prompt)
+
+assert local.solve("math", PRACTICE["math"]) == "Answer: 144"
+assert local.solve("sentiment", PRACTICE["sentiment"]) is None
+
+messages, limit = prompts.render("summary", PRACTICE["summary"])
+assert len(messages) == 2
+assert limit == 105
+print("All local tests passed.")

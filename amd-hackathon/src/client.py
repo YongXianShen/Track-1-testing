@@ -1,4 +1,8 @@
-"""Fireworks async client. All calls go through FIREWORKS_BASE_URL."""
+"""Minimal resilient Fireworks client.
+
+Every remote request uses the harness-provided FIREWORKS_BASE_URL. A second model
+is called only after an actual request failure or empty response.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -8,16 +12,15 @@ from typing import Any
 
 from openai import APIStatusError, AsyncOpenAI
 
-CALL_TIMEOUT_SECONDS = float(os.environ.get("CALL_TIMEOUT_SECONDS", "24"))
-RETRIES = int(os.environ.get("RETRIES", "1"))
-RATE_LIMIT_RETRIES = int(os.environ.get("RATE_LIMIT_RETRIES", "3"))
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "none")
+_TIMEOUT = float(os.environ.get("CALL_TIMEOUT_SECONDS", "30"))
+_RATE_RETRIES = int(os.environ.get("RATE_LIMIT_RETRIES", "3"))
+_NORMAL_RETRIES = int(os.environ.get("RETRIES", "1"))
 
 _client: AsyncOpenAI | None = None
-_no_effort: set[str] = set()
+_unsupported_effort: set[str] = set()
 
 
-def get_client() -> AsyncOpenAI:
+def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
         _client = AsyncOpenAI(
@@ -28,59 +31,77 @@ def get_client() -> AsyncOpenAI:
     return _client
 
 
-async def aclose() -> None:
+async def close() -> None:
     global _client
     if _client is not None:
         await _client.close()
         _client = None
 
 
-def _permanent(error: Exception) -> bool:
-    return isinstance(error, APIStatusError) and error.status_code < 500 and error.status_code != 429
+def _status(error: Exception) -> int | None:
+    return error.status_code if isinstance(error, APIStatusError) else None
 
 
-def _rate_limit(error: Exception) -> bool:
-    return isinstance(error, APIStatusError) and error.status_code == 429
+def _effort(model: str, category: str) -> str | None:
+    # Low effort controls verbose reasoning on GPT-OSS without disabling it.
+    override = os.environ.get("REASONING_EFFORT", "").strip().lower()
+    if override:
+        return override
+    if "gpt-oss" in model.lower():
+        return "low"
+    return None
 
 
-async def complete(model: str, messages: list[dict[str, str]], max_tokens: int) -> tuple[str, dict[str, Any]]:
-    last: Exception | None = None
-    normal_failures = 0
-    rate_failures = 0
+async def complete(
+    model: str,
+    category: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+) -> tuple[str, dict[str, Any]]:
+    last_error: Exception | None = None
+    rate_attempts = 0
+    normal_attempts = 0
+
     while True:
-        send_effort = bool(REASONING_EFFORT) and model not in _no_effort
-        kwargs = {"reasoning_effort": REASONING_EFFORT} if send_effort else {}
+        effort = None if model in _unsupported_effort else _effort(model, category)
+        kwargs: dict[str, Any] = {"reasoning_effort": effort} if effort else {}
         try:
-            resp = await asyncio.wait_for(
-                get_client().chat.completions.create(
+            response = await asyncio.wait_for(
+                _get_client().chat.completions.create(
                     model=model,
                     messages=messages,
-                    max_tokens=max_tokens,
                     temperature=0,
+                    max_tokens=max_tokens,
                     **kwargs,
                 ),
-                timeout=CALL_TIMEOUT_SECONDS,
+                timeout=_TIMEOUT,
             )
-            usage = resp.usage
-            return resp.choices[0].message.content or "", {
-                "prompt_tokens": getattr(usage, "prompt_tokens", 0) or 0,
-                "completion_tokens": getattr(usage, "completion_tokens", 0) or 0,
+            usage = response.usage
+            return response.choices[0].message.content or "", {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
             }
-        except Exception as err:
-            last = err
-            if send_effort and _permanent(err):
-                _no_effort.add(model)
+        except Exception as error:
+            last_error = error
+            status = _status(error)
+
+            if effort and status is not None and 400 <= status < 500 and status != 429:
+                _unsupported_effort.add(model)
                 continue
-            if _permanent(err):
-                break
-            if _rate_limit(err):
-                rate_failures += 1
-                if rate_failures > RATE_LIMIT_RETRIES:
+
+            if status == 429:
+                rate_attempts += 1
+                if rate_attempts > _RATE_RETRIES:
                     break
-                await asyncio.sleep(3.5 * rate_failures + random.uniform(0, 1.5))
+                await asyncio.sleep(2.5 * rate_attempts + random.uniform(0.0, 1.0))
                 continue
-            normal_failures += 1
-            if normal_failures > RETRIES:
+
+            if status is not None and 400 <= status < 500:
                 break
-            await asyncio.sleep(1.2 * normal_failures)
-    raise last or RuntimeError("completion failed")
+
+            normal_attempts += 1
+            if normal_attempts > _NORMAL_RETRIES:
+                break
+            await asyncio.sleep(1.0 * normal_attempts)
+
+    raise last_error or RuntimeError("Fireworks completion failed")

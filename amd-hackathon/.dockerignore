@@ -1,7 +1,8 @@
-__pycache__/
+.git
+.github
+__pycache__
 *.pyc
-.git/
-.env
-input/
-output/
+*.pyo
 *.zip
+test_agent.py
+README.md
