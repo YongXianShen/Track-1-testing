@@ -1,43 +1,34 @@
-# AMD Hackathon Track 1 Agent
+# Track 1 No-Paid-Gemma Router V12
 
-V7 is based on the most stable Fireworks-first version, with a few conservative local deterministic solvers for simple arithmetic, clear sentiment, and exact simple code/logic patterns.
+This version is designed for teams that do **not** want to pay for on-demand Gemma deployment.
 
-## Contract
+## Strategy
 
-- Reads tasks from `/input/tasks.json`
-- Writes results to `/output/results.json`
-- Output schema: `[ { "task_id": ..., "answer": "..." } ]`
-- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS` from the runtime environment
-- Calls only models listed in `ALLOWED_MODELS`
+- Reads `/input/tasks.json`
+- Writes `/output/results.json`
+- Uses only `ALLOWED_MODELS`
+- Does **not** select Gemma by default (`ENABLE_GEMMA=0`)
+- Uses narrow local solvers for simple math/sentiment/logic to save tokens
+- Uses one Fireworks call per unsolved task, with fallback only if the first call fails/returns empty
 
-## Useful environment knobs
+## Model plan
 
-Defaults are safe for hidden evaluation:
+The actual model names depend on `ALLOWED_MODELS` at runtime. The code logs them to stderr as `MODEL_PLAN` and writes `/output/model_usage.json`.
 
-```bash
-ENABLE_SAFE_LOCAL=1
-ENABLE_REVIEW_PASS=0
-MODEL_STRATEGY=stable
-MAX_CONCURRENCY=2
+Default routing:
+
+- `sentiment` -> SMALL capable non-Gemma chat model
+- `factual`, `summary`, `NER` -> LANGUAGE model, preferring Qwen / GLM / GPT-OSS / DeepSeek / Minimax
+- `math`, `logic` -> REASON model, preferring Minimax / DeepSeek / Qwen / GLM / GPT-OSS
+- `debug`, `codegen` -> CODE model, preferring Kimi / coder / code models
+
+## Recommended environment
+
+```text
+ENABLE_GEMMA=0
+ENABLE_LOCAL=1
+CONCURRENCY=4
+REASONING_EFFORT=none
 ```
 
-If score drops, try the safest Fireworks-only mode by setting:
-
-```bash
-ENABLE_SAFE_LOCAL=0
-MODEL_STRATEGY=stable
-```
-
-If model ranking seems bad, try:
-
-```bash
-MODEL_STRATEGY=first
-```
-
-## Docker image
-
-Build linux/amd64 and push to GHCR, for example:
-
-```bash
-docker buildx build --platform linux/amd64 -t ghcr.io/yongxianshen/track-1-testing:latest --push .
-```
+Only set `ENABLE_GEMMA=1` if your team has already deployed Gemma and it appears in `ALLOWED_MODELS`.
