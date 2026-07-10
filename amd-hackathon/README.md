@@ -1,20 +1,34 @@
-# Track 1 Gemma-aware Hybrid Router V11
+# Track 1 No-Paid-Gemma Router V12
 
-This version is based on the stable tiered-router approach:
+This version is designed for teams that do **not** want to pay for on-demand Gemma deployment.
 
-- `/input/tasks.json` -> `/output/results.json`
-- reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, `ALLOWED_MODELS`
-- uses Gemma only when it appears in `ALLOWED_MODELS`
-- prefers Gemma for sentiment, summary, and NER; uses strong general models for factual/math/logic and code models for debug/codegen
-- includes narrow zero-token local solvers for very simple math/sentiment/logic tasks
+## Strategy
 
-Recommended submission environment defaults:
+- Reads `/input/tasks.json`
+- Writes `/output/results.json`
+- Uses only `ALLOWED_MODELS`
+- Does **not** select Gemma by default (`ENABLE_GEMMA=0`)
+- Uses narrow local solvers for simple math/sentiment/logic to save tokens
+- Uses one Fireworks call per unsolved task, with fallback only if the first call fails/returns empty
+
+## Model plan
+
+The actual model names depend on `ALLOWED_MODELS` at runtime. The code logs them to stderr as `MODEL_PLAN` and writes `/output/model_usage.json`.
+
+Default routing:
+
+- `sentiment` -> SMALL capable non-Gemma chat model
+- `factual`, `summary`, `NER` -> LANGUAGE model, preferring Qwen / GLM / GPT-OSS / DeepSeek / Minimax
+- `math`, `logic` -> REASON model, preferring Minimax / DeepSeek / Qwen / GLM / GPT-OSS
+- `debug`, `codegen` -> CODE model, preferring Kimi / coder / code models
+
+## Recommended environment
 
 ```text
-REASONING_EFFORT=none
+ENABLE_GEMMA=0
 ENABLE_LOCAL=1
-CONCURRENCY=5
-GEMMA_FACTUAL=0
+CONCURRENCY=4
+REASONING_EFFORT=none
 ```
 
-Turn on `GEMMA_FACTUAL=1` only if the deployed Gemma model is strong, e.g. a 25B+ model, and the last run suggests factual tasks are failing.
+Only set `ENABLE_GEMMA=1` if your team has already deployed Gemma and it appears in `ALLOWED_MODELS`.
