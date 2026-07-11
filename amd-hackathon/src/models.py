@@ -1,7 +1,8 @@
-"""Dynamic no-paid-deploy model selection for Track 1.
+"""No-paid-deploy model selection for Track 1.
 
-Only model IDs supplied by ALLOWED_MODELS are used. Gemma remains disabled by
-default because on-demand deployment may cost money.
+Gemma is deliberately disabled by default because it may require on-demand deployment.
+The router only selects models from ALLOWED_MODELS and avoids model families that may
+404 or violate the task, unless ENABLE_GEMMA=1 is set explicitly.
 """
 from __future__ import annotations
 
@@ -13,16 +14,15 @@ BAD_RX = re.compile(r"embed|embedding|rerank|image|vision|audio|whisper|tts|guar
 GEMMA_RX = re.compile(r"gemma", re.I)
 CODE_RX = re.compile(r"code|coder|kimi", re.I)
 REASON_RX = re.compile(r"\br1\b|qwq|reason|thinking|think|deepthink", re.I)
-INSTRUCT_RX = re.compile(r"instruct|chat|assistant|turbo|\bit\b", re.I)
+INSTRUCT_RX = re.compile(r"instruct|chat|it|assistant|turbo", re.I)
 SIZE_RX = re.compile(r"(\d+(?:\.\d+|p\d+)?)\s*b\b", re.I)
 MOE_RX = re.compile(r"(\d+)\s*x\s*(\d+)b\b", re.I)
-UNKNOWN_SIZE = 12.0
 
+UNKNOWN_SIZE = 12.0
 
 @dataclass(frozen=True)
 class ModelPlan:
     SMALL: str
-    FACTUAL: str
     LANGUAGE: str
     REASON: str
     CODE: str
@@ -31,7 +31,6 @@ class ModelPlan:
     def as_dict(self) -> dict[str, str]:
         return {
             "SMALL": self.SMALL,
-            "FACTUAL": self.FACTUAL,
             "LANGUAGE": self.LANGUAGE,
             "REASON": self.REASON,
             "CODE": self.CODE,
@@ -45,10 +44,13 @@ def allowed_models() -> list[str]:
     if not models:
         raise ValueError("ALLOWED_MODELS is empty")
     enable_gemma = os.environ.get("ENABLE_GEMMA", "0").strip().lower() in {"1", "true", "yes"}
-    usable = [
-        m for m in models
-        if not BAD_RX.search(m) and (enable_gemma or not GEMMA_RX.search(m))
-    ]
+    usable: list[str] = []
+    for m in models:
+        if BAD_RX.search(m):
+            continue
+        if GEMMA_RX.search(m) and not enable_gemma:
+            continue
+        usable.append(m)
     return usable or [m for m in models if not BAD_RX.search(m)] or models
 
 
@@ -57,23 +59,28 @@ def size_b(model_id: str) -> float:
     moe = MOE_RX.findall(s)
     if moe:
         return max(float(a) * float(b) for a, b in moe)
-    found: list[float] = []
-    for value in SIZE_RX.findall(s):
+    found = []
+    for x in SIZE_RX.findall(s):
         try:
-            found.append(float(value.replace("p", ".")))
-        except ValueError:
+            found.append(float(x.replace("p", ".")))
+        except Exception:
             pass
     return max(found) if found else UNKNOWN_SIZE
 
 
-def _family_score(model: str, category: str) -> int:
-    t = model.lower()
-    score = min(int(size_b(model) * 6), 900)
+def _family_score(m: str, category: str) -> int:
+    t = m.lower()
+    score = 0
+
+    # General safety and quality signals.
+    score += min(int(size_b(m) * 6), 900)
     if INSTRUCT_RX.search(t):
         score += 70
     if REASON_RX.search(t) and category not in {"math", "logic"}:
         score -= 120
 
+    # Category-specific family ranking. These are soft preferences; the allowed
+    # list is still the source of truth.
     if category in {"debug", "codegen"}:
         if "kimi" in t: score += 1100
         if "coder" in t: score += 1000
@@ -92,15 +99,7 @@ def _family_score(model: str, category: str) -> int:
         if "llama" in t: score += 650
         if REASON_RX.search(t): score += 450
         if CODE_RX.search(t): score -= 240
-    elif category == "factual":
-        if "qwen" in t: score += 900
-        if "glm" in t: score += 875
-        if "gpt-oss" in t or "oss" in t: score += 860
-        if "deepseek" in t: score += 825
-        if "minimax" in t or "m3" in t: score += 770
-        if "llama" in t: score += 720
-        if CODE_RX.search(t): score -= 280
-    elif category in {"summary", "ner"}:
+    elif category in {"factual", "summary", "ner"}:
         if "qwen" in t: score += 880
         if "glm" in t: score += 850
         if "gpt-oss" in t or "oss" in t: score += 830
@@ -109,66 +108,57 @@ def _family_score(model: str, category: str) -> int:
         if "llama" in t: score += 720
         if CODE_RX.search(t): score -= 260
     elif category == "sentiment":
+        # Sentiment is easy; prefer a capable non-code chat model, not necessarily largest.
         if "qwen" in t: score += 820
         if "glm" in t: score += 790
         if "gpt-oss" in t or "oss" in t: score += 760
         if "minimax" in t or "m3" in t: score += 740
         if "deepseek" in t: score += 720
         if CODE_RX.search(t): score -= 260
-        score -= max(int(size_b(model) * 2), 0)
+        score -= max(int(size_b(m) * 2), 0)  # gently prefer smaller for easy task
+    else:
+        if "qwen" in t or "glm" in t or "deepseek" in t or "gpt-oss" in t: score += 700
+
     return score
 
 
-def best_for(candidates: list[str], category: str) -> str:
-    return max(candidates, key=lambda m: (_family_score(m, category), -len(m)))
+def best_for(models: list[str], category: str) -> str:
+    return max(models, key=lambda m: (_family_score(m, category), -len(m)))
 
 
 def build_plan() -> ModelPlan:
-    available = allowed_models()
-    non_code = [m for m in available if not CODE_RX.search(m)] or available
-    code_models = [m for m in available if CODE_RX.search(m)] or available
-    return ModelPlan(
-        SMALL=best_for(non_code, "sentiment"),
-        FACTUAL=best_for(non_code, "factual"),
-        LANGUAGE=best_for(non_code, "summary"),
-        REASON=best_for(non_code, "math"),
-        CODE=best_for(code_models, "codegen"),
-        FALLBACK=best_for(non_code, "factual"),
-    )
+    models = allowed_models()
+    non_code = [m for m in models if not CODE_RX.search(m)] or models
+    code_models = [m for m in models if CODE_RX.search(m)] or models
+
+    small = best_for(non_code, "sentiment")
+    language = best_for(non_code, "summary")
+    reason = best_for(non_code, "math")
+    code = best_for(code_models, "codegen")
+    fallback = best_for(non_code, "factual")
+    return ModelPlan(SMALL=small, LANGUAGE=language, REASON=reason, CODE=code, FALLBACK=fallback)
+
+
+def tier_for(category: str, plan: ModelPlan) -> str:
+    if category == "sentiment":
+        return "SMALL"
+    if category in {"factual", "summary", "ner"}:
+        return "LANGUAGE"
+    if category in {"math", "logic"}:
+        return "REASON"
+    if category in {"debug", "codegen"}:
+        return "CODE"
+    return "FALLBACK"
 
 
 def model_for(category: str, plan: ModelPlan) -> str:
-    if category == "sentiment":
-        return plan.SMALL
-    if category == "factual":
-        return plan.FACTUAL
-    if category in {"summary", "ner"}:
-        return plan.LANGUAGE
-    if category in {"math", "logic"}:
-        return plan.REASON
-    if category in {"debug", "codegen"}:
-        return plan.CODE
-    return plan.FALLBACK
+    return getattr(plan, tier_for(category, plan))
 
 
 def fallback_model(category: str, plan: ModelPlan) -> str:
     primary = model_for(category, plan)
-    if category in {"debug", "codegen"}:
-        order = [plan.REASON, plan.FACTUAL, plan.LANGUAGE, plan.SMALL]
-    elif category in {"math", "logic"}:
-        order = [plan.FACTUAL, plan.LANGUAGE, plan.CODE, plan.SMALL]
-    else:
-        order = [plan.FACTUAL, plan.REASON, plan.LANGUAGE, plan.CODE, plan.SMALL]
-    return next((m for m in order if m != primary), primary)
-
-
-def reasoning_effort_for(category: str, model: str) -> str | None:
-    """Use low reasoning only where it may gain correctness without large output.
-
-    The parameter is limited to GPT-OSS-like models known to support it. Other
-    models receive no extra field, avoiding a failed/retried request.
-    """
-    t = model.lower()
-    if category in {"math", "logic"} and ("gpt-oss" in t or "oss" in t):
-        return "low"
-    return None
+    order = [plan.FALLBACK, plan.REASON, plan.LANGUAGE, plan.CODE, plan.SMALL]
+    for m in order:
+        if m != primary:
+            return m
+    return primary
