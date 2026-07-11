@@ -1,4 +1,4 @@
-"""No-paid-deploy model selection for Track 1 V17.2.
+"""No-paid-deploy model selection for Track 1 V17.3.
 
 Every remote model is read from ALLOWED_MODELS. Gemma entries are deliberately
 excluded so this build never requires an on-demand paid deployment. With the

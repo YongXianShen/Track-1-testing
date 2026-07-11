@@ -1,22 +1,21 @@
-"""V17.2 compact prompts.
+"""V17.3 micro-trim prompts.
 
-Routing, models, local solvers, output caps, and fallback behavior are unchanged
-from the proven V17. Only repeated instruction text is shortened to reduce scored
-input tokens while preserving answer requirements.
+Only instruction wording is shortened further. Routing, models, solvers, caps,
+retries, and answer post-processing remain identical to proven V17.2.
 """
 from __future__ import annotations
 
 import re
 
 _SPEC = {
-    "factual": ("Answer every part accurately and concisely in at most 120 words.", 200),
-    "math": ("Solve accurately. Show at most two short steps; end with 'Answer: <final>' and units if needed.", 190),
-    "sentiment": ("Use requested labels; otherwise give Positive, Negative, Neutral, or Mixed plus one brief reason.", 48),
-    "summary": ("Return only the summary; obey every requested format and length constraint exactly.", 170),
-    "ner": ("Return only requested entities, preserving exact text, one per line as 'Entity — TYPE'.", 160),
-    "debug": ("Briefly identify the bug, then give minimal corrected runnable code.", 430),
-    "logic": ("Apply every constraint. Use at most two short deductions; end with 'Answer: <final>'.", 190),
-    "codegen": ("Return only minimal, correct, self-contained code that handles edge cases.", 460),
+    "factual": ("Answer all parts accurately in at most 120 words.", 200),
+    "math": ("Solve; show at most 2 short steps; end 'Answer: <final>' with units.", 190),
+    "sentiment": ("Use requested label, or Positive/Negative/Neutral/Mixed, plus a brief reason.", 48),
+    "summary": ("Output only the summary; obey all length and format limits exactly.", 170),
+    "ner": ("Output only exact entities as 'Entity — TYPE', one per line.", 160),
+    "debug": ("State the bug briefly, then minimal corrected runnable code.", 430),
+    "logic": ("Apply all constraints; at most 2 deductions; end 'Answer: <final>'.", 190),
+    "codegen": ("Output only minimal correct self-contained code; handle edge cases.", 460),
 }
 
 

@@ -126,8 +126,8 @@ def fallback_messages(prompt: str) -> list[dict[str, str]]:
     return [{
         "role": "user",
         "content": (
-            "Return one letter only: A factual, B math, C sentiment, D summary, "
-            "E NER, F debugging, G logic, H code generation.\nTask: " + prompt[:500]
+            "Reply one letter: A fact, B math, C sentiment, D summary, E NER, "
+            "F debug, G logic, H codegen.\n" + prompt[:420]
         ),
     }]
 

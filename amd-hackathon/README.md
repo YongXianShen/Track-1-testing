@@ -1,13 +1,12 @@
-# Track 1 Stable Token Trim V17.2
+# Track 1 Stable Token Trim V17.3
 
-A minimal token-efficiency refinement of the proven V17 result.
+A micro token-efficiency refinement of the proven V17.2 result.
 
-## What changed from V17
+## What changed from V17.2
 
-Only the repeated category instruction text was shortened. The router, deterministic
-solvers, model selection, output caps, retries, fallbacks, concurrency, and result
-schema are unchanged. This minimizes regression risk while reducing Fireworks input
-tokens.
+Only category instruction wording and the rare ambiguous-task router prompt were
+shortened. Models, solvers, classification rules, output caps, retries, fallbacks,
+concurrency, post-processing, and result schema are unchanged.
 
 ## Model plan for the published allowed list
 
