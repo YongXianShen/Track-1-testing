@@ -1,21 +1,26 @@
-# Track 1 Stable Plus V17
+# Track 1 Stable Lean V18
 
-A conservative refinement of the proven V12 hybrid router.
+A conservative optimization of the proven V17 agent.
 
-## Strategy
+## What changed from V17
 
-- High-confidence deterministic arithmetic/sentiment/logic answers use zero Fireworks tokens.
-- Every other task uses one category-appropriate model from `ALLOWED_MODELS`.
-- Gemma stays disabled by default; no paid deployment is needed.
-- A second call occurs only if the first answer is empty or truncated.
-- Short adaptive output budgets reduce token use without compressing factual answers below the proven completeness range.
+- Keeps the V17 dynamic Fireworks model strategy.
+- Uses a separate strongest factual model role.
+- Removes routine LLM routing calls; regex routing is deterministic by default.
+- Adds general zero-token solvers for narrow arithmetic, clear sentiment, small ownership puzzles, a max-list debug pattern, and second-largest-distinct code generation.
+- Uses shorter category prompts and lower output budgets.
+- Uses `reasoning_effort=low` only for GPT-OSS math/logic tasks.
+- Makes a fallback call only when the answer is empty or fails category validation.
+- Enforces exact summary word/sentence constraints when safely possible.
+- Gemma stays disabled by default, so no paid deployment is required.
 
-## Required runtime contract
+## Runtime contract
 
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
 - Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
 - Uses only models supplied in `ALLOWED_MODELS`
+- All remote inference goes through `FIREWORKS_BASE_URL`
 
 ## Local test
 

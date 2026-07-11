@@ -1,7 +1,7 @@
 """Precision router for the eight Track 1 categories.
 
 The rules are intentionally conservative: explicit operations first, code before
-math/logic, and factual as the safe default.  No model call is needed for routing.
+math/logic, and factual as the safe default. No model call is needed for normal routing.
 """
 from __future__ import annotations
 
@@ -114,7 +114,9 @@ def classify(prompt: str) -> Category | None:
     has_logic = strong_logic or bool(_WEAK_LOGIC.search(p))
 
     if has_math and has_logic:
-        return "logic" if strong_logic else None
+        # Comparative/order constraints are logic even when numbers appear.
+        # Otherwise arithmetic intent is the safer interpretation.
+        return "logic" if (strong_logic or _WEAK_LOGIC.search(p)) else "math"
     if has_math:
         return "math"
     if has_logic:

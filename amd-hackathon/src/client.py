@@ -11,7 +11,6 @@ from openai import APIStatusError, AsyncOpenAI
 CALL_TIMEOUT_SECONDS = float(os.environ.get("CALL_TIMEOUT_SECONDS", "24"))
 RETRIES = int(os.environ.get("RETRIES", "1"))
 RATE_LIMIT_RETRIES = int(os.environ.get("RATE_LIMIT_RETRIES", "3"))
-REASONING_EFFORT = os.environ.get("REASONING_EFFORT", "none")
 
 _client: AsyncOpenAI | None = None
 _no_effort: set[str] = set()
@@ -43,13 +42,18 @@ def _rate_limit(error: Exception) -> bool:
     return isinstance(error, APIStatusError) and error.status_code == 429
 
 
-async def complete(model: str, messages: list[dict[str, str]], max_tokens: int) -> tuple[str, dict[str, Any]]:
+async def complete(
+    model: str,
+    messages: list[dict[str, str]],
+    max_tokens: int,
+    reasoning_effort: str | None = None,
+) -> tuple[str, dict[str, Any]]:
     last: Exception | None = None
     normal_failures = 0
     rate_failures = 0
     while True:
-        send_effort = bool(REASONING_EFFORT) and model not in _no_effort
-        kwargs = {"reasoning_effort": REASONING_EFFORT} if send_effort else {}
+        send_effort = bool(reasoning_effort) and model not in _no_effort
+        kwargs = {"reasoning_effort": reasoning_effort} if send_effort else {}
         try:
             response = await asyncio.wait_for(
                 get_client().chat.completions.create(
@@ -70,6 +74,7 @@ async def complete(model: str, messages: list[dict[str, str]], max_tokens: int) 
             }
         except Exception as error:
             last = error
+            # Unsupported reasoning_effort is retried once without the field.
             if send_effort and _permanent(error):
                 _no_effort.add(model)
                 continue
