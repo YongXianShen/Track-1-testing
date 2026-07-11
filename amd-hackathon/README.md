@@ -1,33 +1,23 @@
-# Track 1 Stable Token Trim V17.3
+# Track 1 Judge-Aware Lean V17.4
 
-A micro token-efficiency refinement of the proven V17.2 result.
+A conservative update to the proven V17.2 router. It uses only models supplied
+through `ALLOWED_MODELS`, excludes paid on-demand Gemma deployments, and keeps
+MiniMax M3 for non-code tasks plus Kimi K2P7 Code for code tasks.
 
-## What changed from V17.2
-
-Only category instruction wording and the rare ambiguous-task router prompt were
-shortened. Models, solvers, classification rules, output caps, retries, fallbacks,
-concurrency, post-processing, and result schema are unchanged.
-
-## Model plan for the published allowed list
-
-- `minimax-m3`: factual, math, sentiment (when local solver is not certain), summary, NER, and logic
-- `kimi-k2p7-code`: debugging and code generation
-- Gemma models: never called, so no paid deployment is needed
-
-All selected model IDs still come from `ALLOWED_MODELS` at runtime.
+The update adds generic zero-token solvers for ordered stock changes and recipe
+scaling, improves mixed-sentiment reasons so both sides are explicitly cited,
+and tightens category prompts around the public judging principles.
 
 ## Required runtime contract
 
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
 - Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
-- Sends every Fireworks call through `FIREWORKS_BASE_URL`
-- Uses only models present in `ALLOWED_MODELS`
-- Internal deadline remains 8.5 minutes
+- Routes every Fireworks call through `FIREWORKS_BASE_URL`
+- Produces one `{ "task_id", "answer" }` object per input task
 
-## Local test
+## Expected model plan for the published list
 
-```bash
-pip install -r requirements.txt
-python -m pytest -q
-```
+- `minimax-m3`: factual, math, sentiment, summary, NER, logic
+- `kimi-k2p7-code`: debugging and code generation
+- Gemma models: not called; no paid deployment required

@@ -1,21 +1,22 @@
-"""V17.3 micro-trim prompts.
+"""Scoring-aware compact prompts for Track 1 V17.4.
 
-Only instruction wording is shortened further. Routing, models, solvers, caps,
-retries, and answer post-processing remain identical to proven V17.2.
+The wording follows the public judging principles: completeness, exact format,
+and concise direct answers. Model routing and paid-deployment behavior are
+unchanged from the proven V17.2 build.
 """
 from __future__ import annotations
 
 import re
 
 _SPEC = {
-    "factual": ("Answer all parts accurately in at most 120 words.", 200),
-    "math": ("Solve; show at most 2 short steps; end 'Answer: <final>' with units.", 190),
-    "sentiment": ("Use requested label, or Positive/Negative/Neutral/Mixed, plus a brief reason.", 48),
-    "summary": ("Output only the summary; obey all length and format limits exactly.", 170),
-    "ner": ("Output only exact entities as 'Entity — TYPE', one per line.", 160),
-    "debug": ("State the bug briefly, then minimal corrected runnable code.", 430),
-    "logic": ("Apply all constraints; at most 2 deductions; end 'Answer: <final>'.", 190),
-    "codegen": ("Output only minimal correct self-contained code; handle edge cases.", 460),
+    "factual": ("Answer all parts; include contrasts, reasons, and uses. ≤120 words.", 180),
+    "math": ("Give all values with brief arithmetic; end 'Answer: <final>' with units.", 150),
+    "sentiment": ("One sentence: label and reason; if mixed, mention both sides.", 50),
+    "summary": ("Only the summary; exact format/limits; retain all major themes and both sides when present.", 150),
+    "ner": ("All distinct entities, exact spans: 'Entity — PERSON/ORGANIZATION/LOCATION/DATE'.", 120),
+    "debug": ("Name the bug briefly, then give minimal corrected runnable code.", 390),
+    "logic": ("Use every constraint; ≤2 deductions; end 'Answer: <final>'.", 160),
+    "codegen": ("Only minimal correct self-contained code; handle duplicates and edge cases.", 400),
 }
 
 
@@ -30,26 +31,34 @@ def _requested_count(prompt: str, unit: str) -> int | None:
     return words.get(m.group(1).lower(), int(m.group(1)) if m.group(1).isdigit() else None)
 
 
+def _per_item_word_limit(prompt: str) -> int | None:
+    m = re.search(r"(?:each|per)\s+(?:bullet|point|line|sentence)\D{0,25}(?:no (?:longer|more) than|at most|maximum of|under)\s+(\d+)\s+words?", prompt, re.I)
+    if not m:
+        m = re.search(r"(?:no (?:longer|more) than|at most|maximum of|under)\s+(\d+)\s+words?\s+(?:each|per)\s+(?:bullet|point|line|sentence)", prompt, re.I)
+    return int(m.group(1)) if m else None
+
+
 def _summary_cap(prompt: str, default: int) -> int:
-    word_count = _requested_count(prompt, "word")
-    if word_count is not None:
-        return max(24, min(default, word_count * 3 + 16))
+    # Check bullets first so a per-bullet word limit is not mistaken for a total
+    # word-count request.
+    bullet_count = _requested_count(prompt, "bullet") or _requested_count(prompt, "point")
+    if bullet_count is not None:
+        per_item = _per_item_word_limit(prompt) or 18
+        return max(72, min(default, bullet_count * (per_item * 2 + 6)))
     sentence_count = _requested_count(prompt, "sentence") or _requested_count(prompt, "line")
     if sentence_count is not None:
-        return max(48, min(default, sentence_count * 70))
-    bullet_count = _requested_count(prompt, "bullet")
-    if bullet_count is not None:
-        return max(60, min(default, bullet_count * 55))
+        return max(44, min(default, sentence_count * 58))
+    word_count = _requested_count(prompt, "word")
+    if word_count is not None:
+        return max(24, min(default, word_count * 3 + 14))
     return default
 
 
 def _code_cap(prompt: str, default: int) -> int:
-    # Simple function tasks are common and should not be allowed to ramble.  Larger
-    # artifacts keep the full budget to avoid truncation.
     if re.search(r"\b(?:full program|application|API|endpoint|class|multiple functions|complete implementation)\b", prompt, re.I):
         return default
     if re.search(r"\bfunction\b|\bmethod\b|\bregex\b|\bquery\b", prompt, re.I):
-        return min(default, 360)
+        return min(default, 340)
     return default
 
 
@@ -76,8 +85,7 @@ def postprocess(category: str, text: str) -> str:
         low = text.lower()
         for label in ("mixed", "positive", "negative", "neutral"):
             if re.search(rf"\b{label}\b", low):
-                compact = re.sub(r"\s+", " ", text).strip()
-                return compact[:180]
+                return re.sub(r"\s+", " ", text).strip()[:220]
     if category == "codegen":
         m = re.fullmatch(r"```[a-zA-Z0-9_+\-.#]*\s*\n(.*?)\n```", text, flags=re.S)
         if m:
