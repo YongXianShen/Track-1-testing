@@ -1,4 +1,4 @@
-"""Track 1 Stable Plus V17.1 Reasoning Route.
+"""Track 1 Stable Token Trim V17.2.
 
 Built from the proven no-paid-Gemma V12 baseline.  It preserves V12 model
 selection and one-call routing while tightening classification, local confidence,
@@ -110,7 +110,7 @@ async def solve_task(
 async def run(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
     plan = models.build_plan()
     MODEL_PLAN.update(plan.as_dict())
-    log("MODEL_PLAN", **MODEL_PLAN, version="V17.1", enable_gemma=os.environ.get("ENABLE_GEMMA", "0"))
+    log("MODEL_PLAN", **MODEL_PLAN, version="V17.2", gemma_used=False)
     sem = asyncio.Semaphore(max(1, min(CONCURRENCY, 8)))
     jobs = [solve_task(task, plan, sem, results) for task in tasks]
     remaining = DEADLINE_SECONDS - (time.monotonic() - START)
@@ -146,7 +146,7 @@ def write_usage_log() -> None:
         }
         path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
         with open(path, "w", encoding="utf-8") as file:
-            json.dump({"version": "V17.1", "model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, file, ensure_ascii=False, indent=2)
+            json.dump({"version": "V17.2", "model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, file, ensure_ascii=False, indent=2)
     except Exception as error:
         log("WARN", error=str(error)[:180])
 

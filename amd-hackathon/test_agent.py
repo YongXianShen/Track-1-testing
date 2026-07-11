@@ -5,7 +5,7 @@ import subprocess
 import sys
 import tempfile
 
-from src import prompts, router, solvers
+from src import models, prompts, router, solvers
 
 ROUTING_CASES = {
     "What is sentiment analysis in NLP?": "factual",
@@ -68,3 +68,17 @@ def test_contract_writes_schema():
         data = json.loads(out.read_text())
         assert len(data) == len(practice)
         assert all(set(item) == {"task_id", "answer"} for item in data)
+
+
+def test_published_allowed_model_plan(monkeypatch):
+    monkeypatch.setenv(
+        "ALLOWED_MODELS",
+        "minimax-m3,kimi-k2p7-code,gemma-4-31b-it,gemma-4-26b-a4b-it,gemma-4-31b-it-nvfp4",
+    )
+    plan = models.build_plan()
+    assert plan.SMALL == "minimax-m3"
+    assert plan.LANGUAGE == "minimax-m3"
+    assert plan.REASON == "minimax-m3"
+    assert plan.CODE == "kimi-k2p7-code"
+    assert plan.FALLBACK == "minimax-m3"
+    assert all("gemma" not in model.lower() for model in plan.as_dict().values())

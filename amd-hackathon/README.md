@@ -1,27 +1,30 @@
-# Track 1 Stable Plus V17.1 — Reasoning Route
+# Track 1 Stable Token Trim V17.2
 
-A one-change experiment built from the proven V17 result (84.2%, 5,249 tokens).
+A minimal token-efficiency refinement of the proven V17 result.
 
-## What changed
+## What changed from V17
 
-- Only math/logic model selection changed.
-- Specialist reasoning families are preferred before raw parameter count.
-- Routing, prompts, local solvers, output caps, fallbacks, and Docker behavior remain identical to V17.
+Only the repeated category instruction text was shortened. The router, deterministic
+solvers, model selection, output caps, retries, fallbacks, concurrency, and result
+schema are unchanged. This minimizes regression risk while reducing Fireworks input
+tokens.
 
-## Strategy
+## Model plan for the published allowed list
 
-- High-confidence deterministic arithmetic/sentiment/logic answers use zero Fireworks tokens.
-- Every other task uses one category-appropriate model from `ALLOWED_MODELS`.
-- Gemma stays disabled by default; no paid deployment is needed.
-- A second call occurs only if the first answer is empty or truncated.
-- Short adaptive output budgets reduce token use without compressing factual answers below the proven completeness range.
+- `minimax-m3`: factual, math, sentiment (when local solver is not certain), summary, NER, and logic
+- `kimi-k2p7-code`: debugging and code generation
+- Gemma models: never called, so no paid deployment is needed
+
+All selected model IDs still come from `ALLOWED_MODELS` at runtime.
 
 ## Required runtime contract
 
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
 - Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
-- Uses only models supplied in `ALLOWED_MODELS`
+- Sends every Fireworks call through `FIREWORKS_BASE_URL`
+- Uses only models present in `ALLOWED_MODELS`
+- Internal deadline remains 8.5 minutes
 
 ## Local test
 

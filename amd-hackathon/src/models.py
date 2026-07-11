@@ -1,8 +1,8 @@
-"""No-paid-deploy model selection for Track 1.
+"""No-paid-deploy model selection for Track 1 V17.2.
 
-Gemma is deliberately disabled by default because it may require on-demand deployment.
-The router only selects models from ALLOWED_MODELS and avoids model families that may
-404 or violate the task, unless ENABLE_GEMMA=1 is set explicitly.
+Every remote model is read from ALLOWED_MODELS. Gemma entries are deliberately
+excluded so this build never requires an on-demand paid deployment. With the
+published list, MiniMax handles non-code tasks and Kimi handles code tasks.
 """
 from __future__ import annotations
 
@@ -43,12 +43,11 @@ def allowed_models() -> list[str]:
     models = [m.strip() for m in raw.split(",") if m.strip()]
     if not models:
         raise ValueError("ALLOWED_MODELS is empty")
-    enable_gemma = os.environ.get("ENABLE_GEMMA", "0").strip().lower() in {"1", "true", "yes"}
     usable: list[str] = []
     for m in models:
         if BAD_RX.search(m):
             continue
-        if GEMMA_RX.search(m) and not enable_gemma:
+        if GEMMA_RX.search(m):
             continue
         usable.append(m)
     return usable or [m for m in models if not BAD_RX.search(m)] or models
@@ -126,40 +125,6 @@ def best_for(models: list[str], category: str) -> str:
     return max(models, key=lambda m: (_family_score(m, category), -len(m)))
 
 
-def best_reason_for(models: list[str]) -> str:
-    """Choose a reasoning model without letting raw parameter count dominate.
-
-    V17's generic size bonus made a 120B general model win even when a
-    specialist reasoning family was available. This selector keeps the same
-    ALLOWED_MODELS safety contract but gives family fit priority and uses size
-    only as a small tie-breaker.
-    """
-    def score(m: str) -> tuple[int, float, int]:
-        t = m.lower()
-        family = 0
-        if "minimax" in t or re.search(r"(?:^|[-_/])m3(?:$|[-_/])", t):
-            family = 1000
-        elif "deepseek" in t:
-            family = 930
-        elif "qwen" in t or "qwq" in t:
-            family = 880
-        elif "glm" in t:
-            family = 830
-        elif "gpt-oss" in t or "oss" in t:
-            family = 760
-        elif "llama" in t:
-            family = 700
-        if REASON_RX.search(t):
-            family += 120
-        if CODE_RX.search(t):
-            family -= 300
-        # Modest size tie-breaker only; do not let a very large general model
-        # overpower a category-specialized reasoning model.
-        return (family, min(size_b(m), 80.0), -len(m))
-
-    return max(models, key=score)
-
-
 def build_plan() -> ModelPlan:
     models = allowed_models()
     non_code = [m for m in models if not CODE_RX.search(m)] or models
@@ -167,7 +132,7 @@ def build_plan() -> ModelPlan:
 
     small = best_for(non_code, "sentiment")
     language = best_for(non_code, "summary")
-    reason = best_reason_for(non_code)
+    reason = best_for(non_code, "math")
     code = best_for(code_models, "codegen")
     fallback = best_for(non_code, "factual")
     return ModelPlan(SMALL=small, LANGUAGE=language, REASON=reason, CODE=code, FALLBACK=fallback)

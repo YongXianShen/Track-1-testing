@@ -1,23 +1,22 @@
-"""Accuracy-first prompts with conservative output budgets.
+"""V17.2 compact prompts.
 
-The proven V12 model selection is preserved.  Savings come from shorter, adaptive
-answers rather than extra calls or weaker models.
+Routing, models, local solvers, output caps, and fallback behavior are unchanged
+from the proven V17. Only repeated instruction text is shortened to reduce scored
+input tokens while preserving answer requirements.
 """
 from __future__ import annotations
 
 import re
 
-_BASE = "Answer in English. No preamble. Follow every requested format exactly."
-
 _SPEC = {
-    "factual": (_BASE + " Answer every part clearly and accurately in under 120 words.", 200),
-    "math": (_BASE + " Use at most two short calculation steps, then write 'Answer: <final>' with units if needed.", 190),
-    "sentiment": (_BASE + " Use the prompt's labels; otherwise output Positive, Negative, Neutral, or Mixed, followed by one short reason.", 48),
-    "summary": (_BASE + " Output only the summary. Obey all sentence, word, bullet, length, and style constraints exactly.", 170),
-    "ner": (_BASE + " Extract only requested named entities, preserving their exact text. One per line as 'Entity — TYPE'.", 160),
-    "debug": (_BASE + " Name the bug in one short sentence, then provide minimal corrected runnable code. No unrelated explanation.", 430),
-    "logic": (_BASE + " Apply every constraint. Use at most two short deductions, then write 'Answer: <final>'.", 190),
-    "codegen": (_BASE + " Return only minimal, correct, self-contained code. Handle edge cases. No comments unless requested.", 460),
+    "factual": ("Answer every part accurately and concisely in at most 120 words.", 200),
+    "math": ("Solve accurately. Show at most two short steps; end with 'Answer: <final>' and units if needed.", 190),
+    "sentiment": ("Use requested labels; otherwise give Positive, Negative, Neutral, or Mixed plus one brief reason.", 48),
+    "summary": ("Return only the summary; obey every requested format and length constraint exactly.", 170),
+    "ner": ("Return only requested entities, preserving exact text, one per line as 'Entity — TYPE'.", 160),
+    "debug": ("Briefly identify the bug, then give minimal corrected runnable code.", 430),
+    "logic": ("Apply every constraint. Use at most two short deductions; end with 'Answer: <final>'.", 190),
+    "codegen": ("Return only minimal, correct, self-contained code that handles edge cases.", 460),
 }
 
 
