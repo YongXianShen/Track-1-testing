@@ -1,6 +1,12 @@
-# Track 1 Stable Plus V17
+# Track 1 Stable Plus V17.1 — Reasoning Route
 
-A conservative refinement of the proven V12 hybrid router.
+A one-change experiment built from the proven V17 result (84.2%, 5,249 tokens).
+
+## What changed
+
+- Only math/logic model selection changed.
+- Specialist reasoning families are preferred before raw parameter count.
+- Routing, prompts, local solvers, output caps, fallbacks, and Docker behavior remain identical to V17.
 
 ## Strategy
 

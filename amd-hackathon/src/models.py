@@ -126,6 +126,40 @@ def best_for(models: list[str], category: str) -> str:
     return max(models, key=lambda m: (_family_score(m, category), -len(m)))
 
 
+def best_reason_for(models: list[str]) -> str:
+    """Choose a reasoning model without letting raw parameter count dominate.
+
+    V17's generic size bonus made a 120B general model win even when a
+    specialist reasoning family was available. This selector keeps the same
+    ALLOWED_MODELS safety contract but gives family fit priority and uses size
+    only as a small tie-breaker.
+    """
+    def score(m: str) -> tuple[int, float, int]:
+        t = m.lower()
+        family = 0
+        if "minimax" in t or re.search(r"(?:^|[-_/])m3(?:$|[-_/])", t):
+            family = 1000
+        elif "deepseek" in t:
+            family = 930
+        elif "qwen" in t or "qwq" in t:
+            family = 880
+        elif "glm" in t:
+            family = 830
+        elif "gpt-oss" in t or "oss" in t:
+            family = 760
+        elif "llama" in t:
+            family = 700
+        if REASON_RX.search(t):
+            family += 120
+        if CODE_RX.search(t):
+            family -= 300
+        # Modest size tie-breaker only; do not let a very large general model
+        # overpower a category-specialized reasoning model.
+        return (family, min(size_b(m), 80.0), -len(m))
+
+    return max(models, key=score)
+
+
 def build_plan() -> ModelPlan:
     models = allowed_models()
     non_code = [m for m in models if not CODE_RX.search(m)] or models
@@ -133,7 +167,7 @@ def build_plan() -> ModelPlan:
 
     small = best_for(non_code, "sentiment")
     language = best_for(non_code, "summary")
-    reason = best_for(non_code, "math")
+    reason = best_reason_for(non_code)
     code = best_for(code_models, "codegen")
     fallback = best_for(non_code, "factual")
     return ModelPlan(SMALL=small, LANGUAGE=language, REASON=reason, CODE=code, FALLBACK=fallback)
