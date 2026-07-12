@@ -1,8 +1,8 @@
-"""Track 1 V17.9: guarded Phi-4-mini fully-local agent.
+"""Track 1 V17.10: runtime-optimized Phi-4 fully-local agent.
 
-No Fireworks/API calls are made.  Exact deterministic solvers run first; a
-bundled Phi-4-mini-instruct IQ4_XS model handles unresolved tasks.  The code is
-generic and never branches on hidden task IDs.
+The model is loaded once and unresolved tasks are answered in at most two JSON
+batches (general/reasoning and code).  This removes the per-task generation loop
+that caused V17.9 to exceed the 10-minute limit.  No Fireworks/API calls are made.
 """
 from __future__ import annotations
 
@@ -16,8 +16,7 @@ from . import local_model, prompts, router, solvers
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
-DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", str(8.4 * 60)))
-REPAIR_MIN_REMAINING = float(os.environ.get("REPAIR_MIN_REMAINING", "55"))
+DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", "450"))
 START = time.monotonic()
 
 
@@ -33,15 +32,23 @@ def task_prompt(task: dict[str, Any]) -> str:
     return ""
 
 
+def _source_text(prompt: str) -> str:
+    import re
+    quoted = re.findall(r"['\"]([^'\"]{20,})['\"]", prompt, flags=re.S)
+    if quoted:
+        return quoted[-1]
+    return re.split(r":\s*", prompt, maxsplit=1)[-1]
+
+
 def fallback(category: str, prompt: str) -> str:
-    # Last-resort outputs preserve the required schema if the model cannot run.
+    # Deterministic schema-preserving fallbacks. These are deliberately concise
+    # so the container always completes even if local inference fails.
     if category == "sentiment":
-        return "Neutral — the text does not show a clearly dominant positive or negative view."
+        return "Neutral — no clearly dominant positive or negative view is established."
     if category == "ner":
         return "No named entities identified."
     if category == "summary":
-        source = re_source(prompt)
-        return source[:500].strip()
+        return _source_text(prompt)[:480].strip()
     if category == "math":
         return "Answer: unable to determine"
     if category == "logic":
@@ -49,15 +56,6 @@ def fallback(category: str, prompt: str) -> str:
     if category in {"debug", "codegen"}:
         return "def solution(*args, **kwargs):\n    raise NotImplementedError"
     return "The requested information could not be determined locally."
-
-
-def re_source(prompt: str) -> str:
-    import re
-    quoted = re.findall(r"['\"]([^'\"]{20,})['\"]", prompt, flags=re.S)
-    if quoted:
-        return quoted[-1]
-    parts = re.split(r":\s*", prompt, maxsplit=1)
-    return parts[-1]
 
 
 def write_results(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
@@ -72,36 +70,61 @@ def write_results(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
     os.replace(temp, OUTPUT_PATH)
 
 
-def write_usage(local_count: int, model_count: int) -> None:
+def write_usage(local_count: int, model_count: int, batches: int) -> None:
     path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
     data = {
-        "version": "V17.9-Phi4-ZeroToken",
+        "version": "V17.10-Phi4-Batched-ZeroToken",
         "fireworks_calls": 0,
         "fireworks_tokens": 0,
         "local_model": "Phi-4-mini-instruct-IQ4_XS",
         "deterministic_answers": local_count,
         "local_model_answers": model_count,
+        "local_model_batches": batches,
     }
     with open(path, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=2)
+
+
+def _apply_batch(
+    batch: list[dict[str, str]],
+    results: dict[str, str],
+    prompts_by_id: dict[str, tuple[str, str]],
+    *,
+    code_batch: bool,
+) -> int:
+    if not batch:
+        return 0
+    raw_answers = local_model.answer_batch(batch, code_batch=code_batch)
+    accepted = 0
+    for item in batch:
+        task_id = item["id"]
+        category, prompt = prompts_by_id[task_id]
+        raw = raw_answers.get(task_id, "")
+        answer = prompts.postprocess(category, raw).strip()
+        valid, issue = local_model.validate(category, prompt, answer)
+        if valid:
+            results[task_id] = answer
+            accepted += 1
+        else:
+            results[task_id] = fallback(category, prompt)
+            log("BATCH_INVALID", task_id=task_id, category=category, issue=issue)
+    return accepted
 
 
 def run(tasks: list[dict[str, Any]]) -> dict[str, str]:
     results: dict[str, str] = {}
     deterministic_count = 0
     model_count = 0
+    batches = 0
+    general_batch: list[dict[str, str]] = []
+    code_batch: list[dict[str, str]] = []
+    prompts_by_id: dict[str, tuple[str, str]] = {}
 
-    # Shorter model prompts first provide maximum useful coverage before deadline.
-    prepared: list[tuple[int, dict[str, Any], str, str]] = []
-    for index, task in enumerate(tasks):
+    for task in tasks:
+        task_id = str(task["task_id"])
         prompt = task_prompt(task)
         category = router.classify(prompt) or "factual"
-        prepared.append((index, task, prompt, category))
-
-    unresolved: list[tuple[int, dict[str, Any], str, str]] = []
-    for item in prepared:
-        _, task, prompt, category = item
-        task_id = str(task["task_id"])
+        prompts_by_id[task_id] = (category, prompt)
         if not prompt:
             results[task_id] = ""
             continue
@@ -110,35 +133,42 @@ def run(tasks: list[dict[str, Any]]) -> dict[str, str]:
             results[task_id] = exact
             deterministic_count += 1
             log("DETERMINISTIC", task_id=task_id, category=category)
-        else:
-            unresolved.append(item)
-
-    # Keep code near the end because its longer outputs are slower; prioritize
-    # factual/math/logic/structured language coverage if the runtime is tight.
-    category_priority = {
-        "factual": 0, "math": 1, "logic": 2, "sentiment": 3,
-        "ner": 4, "summary": 5, "debug": 6, "codegen": 7,
-    }
-    unresolved.sort(key=lambda x: (category_priority.get(x[3], 9), len(x[2])))
-
-    for _, task, prompt, category in unresolved:
-        task_id = str(task["task_id"])
-        remaining = DEADLINE_SECONDS - (time.monotonic() - START)
-        if remaining < 8:
-            results[task_id] = fallback(category, prompt)
-            log("DEADLINE_FALLBACK", task_id=task_id, category=category)
             continue
-        try:
-            raw = local_model.answer(category, prompt, allow_repair=remaining >= REPAIR_MIN_REMAINING)
-            answer = prompts.postprocess(category, raw).strip()
-            results[task_id] = answer or fallback(category, prompt)
-            model_count += 1
-            log("LOCAL_MODEL", task_id=task_id, category=category, remaining_s=round(remaining, 1))
-        except Exception as error:
-            results[task_id] = fallback(category, prompt)
-            log("LOCAL_MODEL_ERROR", task_id=task_id, category=category, error=str(error)[:220])
+        item = {"id": task_id, "category": category, "prompt": prompt}
+        if category in {"debug", "codegen"}:
+            code_batch.append(item)
+        else:
+            general_batch.append(item)
 
-    write_usage(deterministic_count, model_count)
+    try:
+        if general_batch and (time.monotonic() - START) < DEADLINE_SECONDS - 30:
+            model_count += _apply_batch(
+                general_batch, results, prompts_by_id, code_batch=False
+            )
+            batches += 1
+            log("LOCAL_BATCH", kind="general", tasks=len(general_batch))
+    except Exception as error:
+        log("LOCAL_BATCH_ERROR", kind="general", error=str(error)[:220])
+
+    try:
+        if code_batch and (time.monotonic() - START) < DEADLINE_SECONDS - 20:
+            model_count += _apply_batch(
+                code_batch, results, prompts_by_id, code_batch=True
+            )
+            batches += 1
+            log("LOCAL_BATCH", kind="code", tasks=len(code_batch))
+    except Exception as error:
+        log("LOCAL_BATCH_ERROR", kind="code", error=str(error)[:220])
+
+    # Always finish with one result per task instead of entering repair loops.
+    for task in tasks:
+        task_id = str(task["task_id"])
+        if task_id not in results:
+            category, prompt = prompts_by_id.get(task_id, ("factual", ""))
+            results[task_id] = fallback(category, prompt)
+            log("FINAL_FALLBACK", task_id=task_id, category=category)
+
+    write_usage(deterministic_count, model_count, batches)
     return results
 
 
@@ -153,7 +183,7 @@ def main() -> int:
         write_results(tasks, results)
         log(
             "DONE",
-            version="V17.9-Phi4-ZeroToken",
+            version="V17.10-Phi4-Batched-ZeroToken",
             tasks=len(tasks),
             answered=sum(bool(value) for value in results.values()),
             fireworks_calls=0,

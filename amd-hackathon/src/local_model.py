@@ -1,71 +1,51 @@
-"""Guarded local inference for Track 1 V17.9.
+"""Runtime-optimized local Phi-4 inference for Track 1 V17.10.
 
-This module never calls Fireworks or any external API.  It uses a bundled
-Phi-4-mini-instruct GGUF model and deterministic validators.  Task-specific
-prompts are generic and do not depend on hidden task IDs or cached answers.
+This module makes zero Fireworks calls.  Instead of generating one response per
+unresolved task, it answers compact batches in strict JSON.  The model is loaded
+once, prompt evaluation is shared across tasks, and no repair generation is used.
 """
 from __future__ import annotations
 
 import ast
+import json
 import os
 import re
 import threading
 from typing import Any
 
 MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", "/models/Phi-4-mini-instruct-IQ4_XS.gguf")
-N_CTX = int(os.environ.get("LOCAL_MODEL_CTX", "2048"))
+N_CTX = int(os.environ.get("LOCAL_MODEL_CTX", "4096"))
 N_THREADS = int(os.environ.get("LOCAL_MODEL_THREADS", "2"))
-N_BATCH = int(os.environ.get("LOCAL_MODEL_BATCH", "32"))
+N_BATCH = int(os.environ.get("LOCAL_MODEL_BATCH", "128"))
 SEED = int(os.environ.get("LOCAL_MODEL_SEED", "42"))
-MAX_REPAIRS = int(os.environ.get("LOCAL_MODEL_REPAIRS", "1"))
+GENERAL_MAX_TOKENS = int(os.environ.get("LOCAL_GENERAL_MAX_TOKENS", "720"))
+CODE_MAX_TOKENS = int(os.environ.get("LOCAL_CODE_MAX_TOKENS", "640"))
 
 _MODEL: Any | None = None
 _LOCK = threading.Lock()
 
-_BASE = (
-    "Solve the task yourself. Check accuracy and every requested part before answering. "
-    "Return only the final answer, without meta-commentary."
+_CATEGORY_CODE = {
+    "factual": "F",
+    "math": "M",
+    "sentiment": "S",
+    "summary": "U",
+    "ner": "N",
+    "logic": "L",
+    "debug": "D",
+    "codegen": "C",
+}
+
+_BATCH_RULES = (
+    "Return only one JSON object mapping each id to its final answer string. "
+    "Answer every id exactly once. F: answer all requested facts, differences, reasons and uses. "
+    "M: calculate in order and include every requested value and unit. "
+    "S: use Positive, Negative, Neutral or Mixed plus one concrete sentence; mixed must mention both sides. "
+    "U: output only the summary and obey exact sentence, bullet and word limits. "
+    "N: list every distinct entity as 'span — PERSON/ORGANIZATION/LOCATION/DATE'. "
+    "L: apply every constraint and end with 'Answer:'. "
+    "D: briefly identify the bug and give minimal corrected runnable code. "
+    "C: give minimal self-contained correct code only. Do not add meta-commentary."
 )
-
-_INSTRUCTIONS: dict[str, tuple[str, int]] = {
-    "factual": (
-        _BASE + " Explain all requested differences, reasons, and uses directly in at most 100 words.",
-        150,
-    ),
-    "math": (
-        _BASE + " Use correct ordered arithmetic. Include all requested values and units; end with 'Answer:'.",
-        140,
-    ),
-    "sentiment": (
-        _BASE + " Use one sentence: Positive, Negative, Neutral, or Mixed, followed by a concrete reason. If mixed, mention both sides.",
-        70,
-    ),
-    "summary": (
-        _BASE + " Output only the summary. Obey exact sentence, bullet, line, and word limits; retain every major side/theme.",
-        190,
-    ),
-    "ner": (
-        _BASE + " Extract every distinct entity with exact span as 'Entity — PERSON/ORGANIZATION/LOCATION/DATE'. Output one per line.",
-        160,
-    ),
-    "logic": (
-        _BASE + " Apply every constraint. Give at most two brief deductions and end with 'Answer: <result>'.",
-        150,
-    ),
-    "debug": (
-        _BASE + " Briefly identify the bug, then provide minimal corrected runnable code that handles stated edge cases.",
-        360,
-    ),
-    "codegen": (
-        _BASE + " Return minimal self-contained correct code only. Handle duplicates, empty input, and specified edge cases.",
-        380,
-    ),
-}
-
-_WORD_NUMBERS = {
-    "one": 1, "single": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
-}
 
 
 def _load() -> Any:
@@ -96,17 +76,41 @@ def _load() -> Any:
 
 def _clean(text: str) -> str:
     text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.I | re.S)
-    text = re.sub(r"^```(?:text|json)?\s*", "", text.strip(), flags=re.I)
+    text = re.sub(r"^```(?:json|text)?\s*", "", text.strip(), flags=re.I)
     text = re.sub(r"\s*```$", "", text.strip())
-    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _extract_json(text: str) -> dict[str, Any]:
+    cleaned = _clean(text)
+    try:
+        parsed = json.loads(cleaned)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        pass
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+
+
+_WORD_NUMBERS = {
+    "one": 1, "single": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+}
 
 
 def _requested_count(prompt: str, unit: str) -> int | None:
     match = re.search(
         rf"\b(one|single|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+{unit}s?\b",
-        prompt,
-        re.I,
+        prompt, re.I,
     )
     if not match:
         return None
@@ -128,9 +132,8 @@ def _strip_fence(text: str) -> str:
 
 
 def _python_syntax_ok(text: str) -> bool:
-    code = _strip_fence(text)
     try:
-        ast.parse(code)
+        ast.parse(_strip_fence(text))
         return True
     except SyntaxError:
         return False
@@ -139,102 +142,95 @@ def _python_syntax_ok(text: str) -> bool:
 def validate(category: str, prompt: str, answer: str) -> tuple[bool, str]:
     answer = _clean(answer)
     if not answer or len(answer) < 3:
-        return False, "The answer is empty."
+        return False, "empty"
     low = answer.lower()
-    if any(phrase in low for phrase in ("i cannot answer", "unable to determine", "summary unavailable", "not enough information")):
-        return False, "The answer refuses instead of solving the task."
-
+    if any(x in low for x in ("i cannot answer", "unable to determine", "not enough information")):
+        return False, "refusal"
     if category == "factual":
-        if _word_count(answer) < 8:
-            return False, "The explanation is too incomplete."
-        if len(re.findall(r"\?", prompt)) >= 2 and _sentence_count(answer) < 2:
-            return False, "The prompt has multiple parts but the answer appears incomplete."
-
-    elif category == "math":
-        if not re.search(r"\d", answer):
-            return False, "A numerical result is missing."
-        # Multi-result questions should normally contain at least two numeric values.
-        if re.search(r"\b(?:and|total cost|how much.+and|both)\b", prompt, re.I):
-            if len(re.findall(r"(?<![A-Za-z])[-+]?\d+(?:\.\d+)?", answer)) < 2:
-                return False, "Not every requested numerical result is present."
-
-    elif category == "sentiment":
+        return (_word_count(answer) >= 8, "incomplete factual answer")
+    if category == "math":
+        return (bool(re.search(r"\d", answer)), "missing numerical result")
+    if category == "sentiment":
         labels = [x for x in ("positive", "negative", "neutral", "mixed") if re.search(rf"\b{x}\b", low)]
-        if not labels or _word_count(answer) < 6:
-            return False, "A supported label and concrete reason are required."
-        source = prompt.lower()
-        contrast = any(token in source for token in (" but ", " however ", " although ", " yet ", " while "))
-        if contrast and labels[0] == "negative":
-            return False, "The contrastive review may contain a positive outcome that was ignored."
-
-    elif category == "summary":
+        return (bool(labels) and _word_count(answer) >= 6, "missing label or reason")
+    if category == "summary":
         bullets = _requested_count(prompt, "bullet") or _requested_count(prompt, "point")
         sentences = _requested_count(prompt, "sentence") or _requested_count(prompt, "line")
         exact_words = _requested_count(prompt, "word") if "exactly" in prompt.lower() else None
         if bullets is not None:
             lines = [line for line in answer.splitlines() if re.match(r"^\s*(?:[-*•]|\d+[.)])\s+", line)]
-            if len(lines) != bullets:
-                return False, f"Return exactly {bullets} bullet points."
-            per = re.search(r"(?:each|per\s+bullet).{0,30}?(\d+)\s+words?", prompt, re.I)
-            if per and any(_word_count(line) > int(per.group(1)) for line in lines):
-                return False, "A bullet exceeds the stated word limit."
-        elif sentences is not None and _sentence_count(answer) != sentences:
-            return False, f"Return exactly {sentences} sentences."
-        elif exact_words is not None and _word_count(answer) != exact_words:
-            return False, f"Return exactly {exact_words} words."
-
-    elif category == "ner":
+            return (len(lines) == bullets, "wrong bullet count")
+        if sentences is not None:
+            return (_sentence_count(answer) == sentences, "wrong sentence count")
+        if exact_words is not None:
+            return (_word_count(answer) == exact_words, "wrong word count")
+        return True, ""
+    if category == "ner":
         labels = re.findall(r"\b(?:PERSON|ORGANIZATION|LOCATION|DATE)\b", answer.upper())
-        if not labels:
-            return False, "No valid entity labels were returned."
-        # Ensure obvious dates in the source are not omitted.
-        if re.search(r"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\b", prompt, re.I):
-            if "DATE" not in answer.upper():
-                return False, "A visible date was omitted."
-
-    elif category == "logic":
-        if not re.search(r"\banswer\s*:", answer, re.I):
-            return False, "End with an explicit Answer: result."
-
-    elif category in {"debug", "codegen"}:
-        if re.search(r"\bpython\b|\bdef\b", prompt, re.I) and not _python_syntax_ok(answer):
-            return False, "The returned Python code is not syntactically valid."
-        if not re.search(r"\bdef\s+\w+|\bclass\s+\w+|#include|\bfunction\s+\w+|\bSELECT\b|=>|\{", answer, re.I):
-            return False, "Runnable code is missing."
-
+        return (bool(labels), "missing entity labels")
+    if category == "logic":
+        return (bool(re.search(r"\banswer\s*:", answer, re.I)), "missing final answer")
+    if category in {"debug", "codegen"}:
+        if re.search(r"\bpython\b|\bdef\b", prompt, re.I):
+            return (_python_syntax_ok(answer), "invalid Python")
+        return (bool(re.search(r"\bdef\s+\w+|\bclass\s+\w+|#include|\bfunction\s+\w+|\bSELECT\b|=>|\{", answer, re.I)), "missing code")
     return True, ""
 
 
-def _generate(system: str, user: str, max_tokens: int) -> str:
+def _generate_json(payload: list[dict[str, str]], max_tokens: int) -> dict[str, str]:
     model = _load()
-    result = model.create_chat_completion(
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.0,
-        top_p=1.0,
-        max_tokens=max_tokens,
-        repeat_penalty=1.04,
-        seed=SEED,
-    )
+    user = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    kwargs: dict[str, Any] = {
+        "messages": [
+            {"role": "system", "content": _BATCH_RULES},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_tokens": max_tokens,
+        "repeat_penalty": 1.03,
+        "seed": SEED,
+    }
+    # llama-cpp-python supports JSON-constrained output.  If a wheel/runtime
+    # lacks this option, retry once without the constraint rather than failing.
+    try:
+        result = model.create_chat_completion(
+            **kwargs,
+            response_format={"type": "json_object"},
+        )
+    except (TypeError, ValueError):
+        result = model.create_chat_completion(**kwargs)
+
     choices = result.get("choices") or []
     if not choices:
-        return ""
+        return {}
     message = choices[0].get("message") or {}
-    return _clean(str(message.get("content") or ""))
+    parsed = _extract_json(str(message.get("content") or ""))
+    answers: dict[str, str] = {}
+    for key, value in parsed.items():
+        if isinstance(value, str):
+            answers[str(key)] = value.strip()
+        elif value is not None:
+            answers[str(key)] = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return answers
 
 
-def answer(category: str, prompt: str, allow_repair: bool = True) -> str:
-    instruction, cap = _INSTRUCTIONS.get(category, _INSTRUCTIONS["factual"])
-    draft = _generate(instruction, prompt, cap)
-    ok, issue = validate(category, prompt, draft)
-    if ok or not allow_repair or MAX_REPAIRS <= 0:
-        return _strip_fence(draft) if category == "codegen" else draft
+def answer_batch(items: list[dict[str, str]], *, code_batch: bool = False) -> dict[str, str]:
+    """Answer a compact batch.
 
-    repair_system = (
-        instruction
-        + " The previous answer failed a deterministic format/completeness check. Correct it; do not discuss the check."
-    )
-    repair_user = f"TASK:\n{prompt}\n\nPREVIOUS ANSWER:\n{draft}\n\nPROBLEM:\n{issue}"
-    repaired = _generate(repair_system, repair_user, cap)
-    repaired_ok, _ = validate(category, prompt, repaired)
-    chosen = repaired if repaired_ok else draft
-    return _strip_fence(chosen) if category == "codegen" else chosen
+    Each item must contain ``id``, ``category`` and ``prompt``.  A category code
+    is sent instead of a repeated natural-language instruction to keep prompt
+    evaluation small.  The caller validates/post-processes individual answers.
+    """
+    if not items:
+        return {}
+    payload = [
+        {
+            "id": str(item["id"]),
+            "c": _CATEGORY_CODE.get(item["category"], "F"),
+            "q": item["prompt"],
+        }
+        for item in items
+    ]
+    cap = CODE_MAX_TOKENS if code_batch else GENERAL_MAX_TOKENS
+    return _generate_json(payload, cap)
