@@ -1,38 +1,68 @@
-# Brocacho Track 1 — Ultra-Local V17.6
+# Track 1 Llama-Hybrid V17.7
 
-Aggressive token-efficiency experiment built from the 94.7% / 5,027-token V17.4 baseline.
+A conservative hybrid version built from V17.5.
 
-## Strategy
+## Local model
 
-- High-confidence deterministic solvers answer suitable factual, math, sentiment, summary, NER, and small logic tasks locally.
-- Remaining non-code tasks are sent together in one `minimax-m3` request.
-- Remaining debug/code-generation tasks are sent together in one `kimi-k2p7-code` request.
-- Missing or malformed batch answers fall back to the proven per-task route.
-- Gemma is excluded, so no paid on-demand deployment is needed.
+- **Model:** Meta Llama 3.2 3B Instruct
+- **Quantization:** Q4_K_M GGUF (4-bit)
+- **Runtime:** llama-cpp-python / llama.cpp, CPU only
+- **Bundled at Docker build:** yes
+- **Runtime download:** no
+- **Paid deployment:** no
 
-## Required environment
+The model is downloaded during the Docker build from the public GGUF repository
+`bartowski/Llama-3.2-3B-Instruct-GGUF`. Use remains subject to the Meta Llama
+3.2 Community License and Acceptable Use Policy.
 
-- `FIREWORKS_API_KEY`
-- `FIREWORKS_BASE_URL`
-- `ALLOWED_MODELS`
+## Safe default routing
 
-The harness supplies these values. All remote calls use `FIREWORKS_BASE_URL`, and selected models come only from `ALLOWED_MODELS`.
+1. Deterministic Python solvers run first.
+2. Llama runs locally for `sentiment,summary,ner`.
+3. Invalid local answers fall back to the proven Fireworks batch route.
+4. MiniMax M3 handles remaining non-code tasks.
+5. Kimi K2P7 Code handles remaining code tasks.
 
-## Container contract
+This default is designed to reduce Fireworks tokens without replacing every
+high-accuracy remote answer with a 3B local model.
+
+## Optional modes
+
+```text
+LLAMA_CATEGORIES=sentiment,summary,ner,factual
+```
+
+adds factual tasks to local inference for a more aggressive token reduction.
+
+```text
+LOCAL_ONLY=1
+LLAMA_CATEGORIES=factual,math,sentiment,summary,ner,logic,debug,codegen
+```
+
+uses zero Fireworks calls, but is experimental and is not recommended when the
+accuracy gate matters.
+
+## Contract
 
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
-- Linux `amd64`
-- Exit code `0` on success
+- Writes optional diagnostics to `/output/model_usage.json`
+- Default internal deadline: 8.5 minutes
+- Intended platform: `linux/amd64`, 4 GB RAM, 2 vCPU
 
-## Important
+## Local smoke test
 
-This is an aggressive experiment intended to approach sub-1,000 scored tokens. Preserve the V17.4 image/commit before replacing `latest`; hidden-set accuracy cannot be guaranteed.
+```bash
+docker build --platform linux/amd64 -t track1-llama-v177 .
+mkdir -p input output
+# place tasks.json in ./input
+docker run --rm --memory=4g --cpus=2 \
+  -e FIREWORKS_API_KEY=dummy \
+  -e FIREWORKS_BASE_URL=http://127.0.0.1:9/v1 \
+  -e ALLOWED_MODELS=minimax-m3,kimi-k2p7-code \
+  -v "$PWD/input:/input" -v "$PWD/output:/output" \
+  track1-llama-v177
+```
 
-
-## V17.6 ultra-local mode
-
-- Solves broad factual, math, sentiment, summary, NER, common code, and simple logic tasks locally.
-- Sends at most three unresolved tasks to compact MiniMax/Kimi batches.
-- Uses no Gemma deployment and no personal paid API.
-- Default remote budget: `REMOTE_TASK_BUDGET=3`.
+For a true hybrid test, use valid Fireworks variables. For a local-only test,
+set `LOCAL_ONLY=1` and no Fireworks variables are required.
