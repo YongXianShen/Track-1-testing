@@ -1,30 +1,36 @@
-# Brocacho Track 1 — Batch-Lean V17.5
+# Track 1 V17.9 — Phi-4 Zero-Token Guarded Agent
 
-Aggressive token-efficiency experiment built from the 94.7% / 5,027-token V17.4 baseline.
+Fully local Track 1 experiment. It makes **zero Fireworks API calls**.
 
-## Strategy
+## Model
 
-- High-confidence deterministic solvers answer suitable factual, math, sentiment, summary, NER, and small logic tasks locally.
-- Remaining non-code tasks are sent together in one `minimax-m3` request.
-- Remaining debug/code-generation tasks are sent together in one `kimi-k2p7-code` request.
-- Missing or malformed batch answers fall back to the proven per-task route.
-- Gemma is excluded, so no paid on-demand deployment is needed.
+- Microsoft Phi-4-mini-instruct, 3.8B parameters
+- GGUF IQ4_XS quantization (~2.22 GB)
+- `llama-cpp-python`, CPU-only, 2 threads
+- Bundled into the Docker image during build
 
-## Required environment
+## Pipeline
 
-- `FIREWORKS_API_KEY`
-- `FIREWORKS_BASE_URL`
-- `ALLOWED_MODELS`
+1. Read `/input/tasks.json`.
+2. Classify each task into the eight Track 1 categories.
+3. Use generic deterministic solvers when they can produce an exact answer.
+4. Use the bundled local model for unresolved tasks.
+5. Validate strict sentiment, summary, NER, math, logic, and code formats.
+6. Write `/output/results.json`.
 
-The harness supplies these values. All remote calls use `FIREWORKS_BASE_URL`, and selected models come only from `ALLOWED_MODELS`.
+No hidden task IDs, prompt hashes, answer cache, Fireworks calls, or paid deployment are used.
 
-## Container contract
+## Runtime
 
-- Reads `/input/tasks.json`
-- Writes `/output/results.json`
-- Linux `amd64`
-- Exit code `0` on success
+Designed for `linux/amd64`, 4 GB RAM, 2 vCPU, and the 10-minute limit. The model is downloaded at Docker **build** time, never at evaluation runtime.
 
-## Important
+## Local smoke test
 
-This is an aggressive experiment intended to approach sub-1,000 scored tokens. Preserve the V17.4 image/commit before replacing `latest`; hidden-set accuracy cannot be guaranteed.
+```bash
+docker build --platform linux/amd64 -t track1-v179 .
+mkdir -p input output
+# place tasks.json in ./input
+docker run --rm --platform linux/amd64 --memory=4g --cpus=2 \
+  -v "$PWD/input:/input:ro" -v "$PWD/output:/output" track1-v179
+cat output/results.json
+```
