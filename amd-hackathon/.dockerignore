@@ -5,7 +5,3 @@ __pycache__/
 input/
 output/
 *.zip
-__pycache__
-*.pyc
-.pytest_cache
-.git

@@ -1,8 +1,8 @@
-"""Track 1 Local-GGUF Hybrid V17.8.
+"""Track 1 Batch-Lean V17.5.
 
-Built from the proven V17.5 batch router. Deterministic solvers run first.
-A bundled 4-bit instruction model handles selected language categories locally.
-Invalid or failed local answers fall back to the proven MiniMax/Kimi batch path.
+Built from the 94.7% V17.4 submission.  High-confidence tasks remain local;
+all other non-code tasks are sent in one MiniMax request and all code tasks in
+one Kimi request.  Missing or malformed batch answers fall back individually.
 """
 from __future__ import annotations
 
@@ -13,21 +13,16 @@ import sys
 import time
 from typing import Any
 
-from . import batching, client, local_model, models, prompts, router, solvers
+from . import batching, client, models, prompts, router, solvers
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", str(8.5 * 60)))
 ENABLE_LOCAL = os.environ.get("ENABLE_LOCAL", "1").strip().lower() in {"1", "true", "yes"}
-ENABLE_LOCAL_MODEL = os.environ.get("ENABLE_LOCAL_MODEL", "1").strip().lower() in {"1", "true", "yes"}
 ENABLE_BATCH = os.environ.get("ENABLE_BATCH", "1").strip().lower() in {"1", "true", "yes"}
-LOCAL_ONLY = os.environ.get("LOCAL_ONLY", "0").strip().lower() in {"1", "true", "yes"}
-LOCAL_MODEL_MIN_REMAINING = float(os.environ.get("LOCAL_MODEL_MIN_REMAINING", "70"))
-VERSION = os.environ.get("AGENT_VERSION", "V17.8")
 
 START = time.monotonic()
 CALL_LOG: list[dict[str, Any]] = []
-LOCAL_MODEL_LOG: list[dict[str, Any]] = []
 MODEL_PLAN: dict[str, str] = {}
 
 
@@ -71,7 +66,7 @@ async def individual_fallback(item: dict[str, str], plan: models.ModelPlan) -> s
 
 
 async def solve_batch(items: list[dict[str, str]], plan: models.ModelPlan, code_batch: bool) -> dict[str, str]:
-    if not items or LOCAL_ONLY:
+    if not items:
         return {}
     model = plan.CODE if code_batch else plan.REASON
     messages = batching.make_messages(items, code_batch=code_batch)
@@ -80,6 +75,8 @@ async def solve_batch(items: list[dict[str, str]], plan: models.ModelPlan, code_
     text, truncated = await try_complete(label, model, messages, cap)
     categories = {item["task_id"]: item["category"] for item in items}
     answers = {} if truncated else batching.parse_answers(text, set(categories), categories)
+
+    # Reliability first: only missing/malformed entries use the proven V17.4 path.
     missing = [item for item in items if item["task_id"] not in answers]
     if missing:
         log("BATCH_MISSING", label=label, count=len(missing), ids=[x["task_id"] for x in missing])
@@ -90,32 +87,10 @@ async def solve_batch(items: list[dict[str, str]], plan: models.ModelPlan, code_
     return answers
 
 
-async def try_local_model(item: dict[str, str]) -> str:
-    before = time.monotonic()
-    try:
-        answer = await asyncio.to_thread(local_model.complete, item["category"], item["prompt"])
-        valid = local_model.validate(item["category"], item["prompt"], answer)
-        LOCAL_MODEL_LOG.append({
-            "task_id": item["task_id"],
-            "category": item["category"],
-            "valid": valid,
-            "elapsed_s": round(time.monotonic() - before, 2),
-        })
-        log("LOCAL_MODEL", task_id=item["task_id"], category=item["category"], valid=valid,
-            elapsed_s=round(time.monotonic() - before, 2))
-        return prompts.postprocess(item["category"], answer) if valid else ""
-    except Exception as error:
-        LOCAL_MODEL_LOG.append({"task_id": item["task_id"], "category": item["category"],
-                                "valid": False, "error": str(error)[:180]})
-        log("LOCAL_MODEL_ERROR", task_id=item["task_id"], error=str(error)[:220])
-        return ""
-
-
 async def run(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
     plan = models.build_plan()
     MODEL_PLAN.update(plan.as_dict())
-    log("MODEL_PLAN", **MODEL_PLAN, version=VERSION, local_model=local_model.MODEL_NAME,
-        local_categories=sorted(local_model.CATEGORIES), local_only=LOCAL_ONLY)
+    log("MODEL_PLAN", **MODEL_PLAN, version="V17.5", gemma_used=False, batch=ENABLE_BATCH)
 
     pending_general: list[dict[str, str]] = []
     pending_code: list[dict[str, str]] = []
@@ -129,34 +104,10 @@ async def run(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
             local = solvers.solve(category, prompt)
             if local:
                 results[task_id] = local
-                log("LOCAL_RULE", task_id=task_id, category=category)
+                log("LOCAL", task_id=task_id, category=category)
                 continue
         item = {"task_id": task_id, "category": category, "prompt": prompt}
         (pending_code if category in {"debug", "codegen"} else pending_general).append(item)
-
-    if ENABLE_LOCAL_MODEL:
-        remaining_items: list[dict[str, str]] = []
-        for item in pending_general + pending_code:
-            remaining = DEADLINE_SECONDS - (time.monotonic() - START)
-            should_try = local_model.enabled_for(item["category"]) or LOCAL_ONLY
-            if should_try and remaining > LOCAL_MODEL_MIN_REMAINING:
-                answer = await try_local_model(item)
-                if answer:
-                    results[item["task_id"]] = answer
-                    continue
-            remaining_items.append(item)
-        pending_general = [x for x in remaining_items if x["category"] not in {"debug", "codegen"}]
-        pending_code = [x for x in remaining_items if x["category"] in {"debug", "codegen"}]
-
-    if LOCAL_ONLY:
-        for item in pending_general + pending_code:
-            if DEADLINE_SECONDS - (time.monotonic() - START) <= LOCAL_MODEL_MIN_REMAINING:
-                break
-            answer = await try_local_model(item)
-            if answer:
-                results[item["task_id"]] = answer
-        await client.aclose()
-        return
 
     if ENABLE_BATCH:
         remaining = DEADLINE_SECONDS - (time.monotonic() - START)
@@ -200,15 +151,11 @@ def write_usage_log() -> None:
             "prompt_tokens": sum(int(call.get("prompt_tokens", 0)) for call in CALL_LOG),
             "completion_tokens": sum(int(call.get("completion_tokens", 0)) for call in CALL_LOG),
             "total_tokens": sum(int(call.get("prompt_tokens", 0)) + int(call.get("completion_tokens", 0)) for call in CALL_LOG),
-            "fireworks_calls": len(CALL_LOG),
-            "local_model_calls": len(LOCAL_MODEL_LOG),
+            "calls": len(CALL_LOG),
         }
         path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
         with open(path, "w", encoding="utf-8") as file:
-            json.dump({"version": VERSION, "local_model": local_model.MODEL_NAME,
-                       "model_plan": MODEL_PLAN, "local_calls": LOCAL_MODEL_LOG,
-                       "fireworks_calls": CALL_LOG, "totals": totals}, file,
-                      ensure_ascii=False, indent=2)
+            json.dump({"version": "V17.5", "model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, file, ensure_ascii=False, indent=2)
     except Exception as error:
         log("WARN", error=str(error)[:180])
 
@@ -220,16 +167,14 @@ def main() -> int:
         if not isinstance(raw, list):
             raise ValueError("tasks.json must be a list")
         tasks = [task for task in raw if isinstance(task, dict) and task.get("task_id")]
-        if not LOCAL_ONLY:
-            required = ("FIREWORKS_API_KEY", "FIREWORKS_BASE_URL", "ALLOWED_MODELS")
-            if any(not os.environ.get(name) for name in required):
-                raise ValueError("FIREWORKS_API_KEY, FIREWORKS_BASE_URL, and ALLOWED_MODELS are required")
+        required = ("FIREWORKS_API_KEY", "FIREWORKS_BASE_URL", "ALLOWED_MODELS")
+        if any(not os.environ.get(name) for name in required):
+            raise ValueError("FIREWORKS_API_KEY, FIREWORKS_BASE_URL, and ALLOWED_MODELS are required")
         results = {str(task["task_id"]): "" for task in tasks}
         asyncio.run(run(tasks, results))
         write_results(tasks, results)
         write_usage_log()
-        log("DONE", tasks=len(tasks), answered=sum(bool(value) for value in results.values()),
-            elapsed_s=round(time.monotonic() - START, 1))
+        log("DONE", tasks=len(tasks), answered=sum(bool(value) for value in results.values()), elapsed_s=round(time.monotonic() - START, 1))
         return 0
     except Exception as error:
         log("FATAL", error=str(error)[:300])
