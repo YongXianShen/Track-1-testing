@@ -1,4 +1,4 @@
-# Brocacho Track 1 — Batch-Lean V17.5
+# Brocacho Track 1 — Ultra-Local V17.6
 
 Aggressive token-efficiency experiment built from the 94.7% / 5,027-token V17.4 baseline.
 
@@ -28,3 +28,11 @@ The harness supplies these values. All remote calls use `FIREWORKS_BASE_URL`, an
 ## Important
 
 This is an aggressive experiment intended to approach sub-1,000 scored tokens. Preserve the V17.4 image/commit before replacing `latest`; hidden-set accuracy cannot be guaranteed.
+
+
+## V17.6 ultra-local mode
+
+- Solves broad factual, math, sentiment, summary, NER, common code, and simple logic tasks locally.
+- Sends at most three unresolved tasks to compact MiniMax/Kimi batches.
+- Uses no Gemma deployment and no personal paid API.
+- Default remote budget: `REMOTE_TASK_BUDGET=3`.
