@@ -1,9 +1,8 @@
-"""Local Llama 3.2 3B Instruct Q4_K_M inference.
+"""Conservative local GGUF inference used by V17.8 hybrid variants.
 
-The model is loaded lazily and reused for all local generations.  This module
-never calls Fireworks.  It is intentionally conservative: only categories in
-LLAMA_CATEGORIES are attempted, and malformed outputs fall back to the proven
-remote V17.5 path unless LOCAL_ONLY=1.
+The model is loaded lazily and reused. Only configured categories are attempted.
+Invalid or failed local outputs fall back to the proven V17.5 MiniMax/Kimi path.
+This module never calls Fireworks.
 """
 from __future__ import annotations
 
@@ -12,34 +11,32 @@ import re
 import threading
 from typing import Any
 
-MODEL_PATH = os.environ.get(
-    "LLAMA_MODEL_PATH",
-    "/models/Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-)
-N_CTX = int(os.environ.get("LLAMA_CTX", "2048"))
-N_THREADS = int(os.environ.get("LLAMA_THREADS", "2"))
-N_BATCH = int(os.environ.get("LLAMA_BATCH", "128"))
-SEED = int(os.environ.get("LLAMA_SEED", "42"))
+MODEL_PATH = os.environ.get("LOCAL_MODEL_PATH", "/models/model.gguf")
+MODEL_NAME = os.environ.get("LOCAL_MODEL_NAME", "local-gguf")
+N_CTX = int(os.environ.get("LOCAL_MODEL_CTX", "1536"))
+N_THREADS = int(os.environ.get("LOCAL_MODEL_THREADS", "2"))
+N_BATCH = int(os.environ.get("LOCAL_MODEL_BATCH", "64"))
+SEED = int(os.environ.get("LOCAL_MODEL_SEED", "42"))
 
-_DEFAULT_CATEGORIES = "sentiment,summary,ner"
+_DEFAULT_CATEGORIES = "sentiment,summary"
 CATEGORIES = {
-    x.strip().lower()
-    for x in os.environ.get("LLAMA_CATEGORIES", _DEFAULT_CATEGORIES).split(",")
-    if x.strip()
+    item.strip().lower()
+    for item in os.environ.get("LOCAL_MODEL_CATEGORIES", _DEFAULT_CATEGORIES).split(",")
+    if item.strip()
 }
 
 _MODEL: Any | None = None
 _LOCK = threading.Lock()
 
 _SPEC: dict[str, tuple[str, int]] = {
-    "factual": ("Answer every part directly and accurately in at most 90 words.", 150),
-    "math": ("Show brief arithmetic and end with 'Answer: <final>' including units.", 120),
-    "sentiment": ("One sentence: Positive, Negative, Neutral, or Mixed, then a reason. Mention both sides if mixed.", 64),
-    "summary": ("Return only the requested summary. Obey exact sentence, bullet, line, and word limits.", 180),
-    "ner": ("List every distinct entity as 'Entity — PERSON/ORGANIZATION/LOCATION/DATE'. Preserve exact spans.", 140),
-    "logic": ("Apply every constraint, use at most two short deductions, and end with 'Answer: <final>'.", 140),
-    "debug": ("Briefly name the bug, then provide minimal corrected runnable code.", 300),
-    "codegen": ("Return minimal self-contained correct code only, handling stated edge cases.", 320),
+    "factual": ("Answer every part accurately and directly in at most 80 words.", 128),
+    "math": ("Show only essential arithmetic and end with Answer: followed by the final value and unit.", 112),
+    "sentiment": ("One sentence only: label Positive, Negative, Neutral, or Mixed, then justify it from the text; mention both sides if mixed.", 56),
+    "summary": ("Return only the requested summary and obey exact sentence, bullet, line, and word limits.", 150),
+    "ner": ("List every distinct entity as Entity — PERSON/ORGANIZATION/LOCATION/DATE; preserve exact spans.", 120),
+    "logic": ("Apply every constraint, give at most two brief deductions, and end with Answer: followed by the result.", 120),
+    "debug": ("Briefly identify the bug, then provide minimal corrected runnable code.", 260),
+    "codegen": ("Return minimal self-contained correct code only and handle stated edge cases.", 280),
 }
 
 
@@ -58,6 +55,8 @@ def _load_model() -> Any:
             raise FileNotFoundError(f"local model missing: {MODEL_PATH}")
         from llama_cpp import Llama
 
+        # Let llama-cpp read the chat template embedded in the GGUF. This works
+        # for both Qwen2.5 and Gemma 2 and avoids forcing the wrong template.
         _MODEL = Llama(
             model_path=MODEL_PATH,
             n_ctx=N_CTX,
@@ -69,7 +68,6 @@ def _load_model() -> Any:
             use_mlock=False,
             seed=SEED,
             verbose=False,
-            chat_format="llama-3",
         )
         return _MODEL
 
@@ -82,8 +80,7 @@ def _strip(text: str) -> str:
 
 
 def _sentence_count(text: str) -> int:
-    parts = [p for p in re.split(r"(?<=[.!?])\s+", text.strip()) if p.strip()]
-    return len(parts)
+    return len([part for part in re.split(r"(?<=[.!?])\s+", text.strip()) if part.strip()])
 
 
 def _word_count(text: str) -> int:
@@ -93,8 +90,7 @@ def _word_count(text: str) -> int:
 def _requested_count(prompt: str, unit: str) -> int | None:
     words = {
         "one": 1, "single": 1, "two": 2, "three": 3, "four": 4,
-        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
-        "ten": 10,
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
     }
     match = re.search(
         rf"\b(one|single|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+{unit}s?\b",
@@ -109,24 +105,32 @@ def _requested_count(prompt: str, unit: str) -> int | None:
 
 def validate(category: str, prompt: str, answer: str) -> bool:
     answer = _strip(answer)
-    if not answer or len(answer) < 2:
+    if not answer or len(answer) < 3:
         return False
     low = answer.lower()
     if category == "sentiment":
-        if not any(re.search(rf"\b{x}\b", low) for x in ("positive", "negative", "neutral", "mixed")):
+        labels = [name for name in ("positive", "negative", "neutral", "mixed") if re.search(rf"\b{name}\b", low)]
+        if not labels or len(answer.split()) < 5:
             return False
-        if len(answer.split()) < 4:
-            return False
+        # Contrast-heavy prompts must not be accepted as one-sided negative.
+        prompt_low = prompt.lower()
+        if any(word in prompt_low for word in (" but ", " however ", " although ", " yet ")):
+            if labels[0] == "negative":
+                return False
     elif category == "ner":
-        if not any(label in answer.upper() for label in ("PERSON", "ORGANIZATION", "LOCATION", "DATE")):
+        labels = ("PERSON", "ORGANIZATION", "LOCATION", "DATE")
+        if not any(label in answer.upper() for label in labels):
             return False
     elif category == "summary":
         sentences = _requested_count(prompt, "sentence") or _requested_count(prompt, "line")
         bullets = _requested_count(prompt, "bullet") or _requested_count(prompt, "point")
         words = _requested_count(prompt, "word")
         if bullets is not None:
-            actual = len([line for line in answer.splitlines() if re.match(r"^\s*(?:[-*•]|\d+[.)])\s+", line)])
-            if actual != bullets:
+            lines = [line for line in answer.splitlines() if re.match(r"^\s*(?:[-*•]|\d+[.)])\s+", line)]
+            if len(lines) != bullets:
+                return False
+            per_item = re.search(r"(?:each|per bullet)[^\d]{0,20}(\d+)\s+words?", prompt, re.I)
+            if per_item and any(_word_count(line) > int(per_item.group(1)) for line in lines):
                 return False
         elif sentences is not None and _sentence_count(answer) != sentences:
             return False

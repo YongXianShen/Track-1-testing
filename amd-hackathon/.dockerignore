@@ -1,8 +1,11 @@
-.git
+__pycache__/
+*.pyc
+.git/
+.env
+input/
+output/
+*.zip
 __pycache__
 *.pyc
 .pytest_cache
-models
-*.gguf
-output
-input
+.git
