@@ -1,23 +1,30 @@
-# Track 1 Judge-Aware Lean V17.4
+# Brocacho Track 1 — Batch-Lean V17.5
 
-A conservative update to the proven V17.2 router. It uses only models supplied
-through `ALLOWED_MODELS`, excludes paid on-demand Gemma deployments, and keeps
-MiniMax M3 for non-code tasks plus Kimi K2P7 Code for code tasks.
+Aggressive token-efficiency experiment built from the 94.7% / 5,027-token V17.4 baseline.
 
-The update adds generic zero-token solvers for ordered stock changes and recipe
-scaling, improves mixed-sentiment reasons so both sides are explicitly cited,
-and tightens category prompts around the public judging principles.
+## Strategy
 
-## Required runtime contract
+- High-confidence deterministic solvers answer suitable factual, math, sentiment, summary, NER, and small logic tasks locally.
+- Remaining non-code tasks are sent together in one `minimax-m3` request.
+- Remaining debug/code-generation tasks are sent together in one `kimi-k2p7-code` request.
+- Missing or malformed batch answers fall back to the proven per-task route.
+- Gemma is excluded, so no paid on-demand deployment is needed.
+
+## Required environment
+
+- `FIREWORKS_API_KEY`
+- `FIREWORKS_BASE_URL`
+- `ALLOWED_MODELS`
+
+The harness supplies these values. All remote calls use `FIREWORKS_BASE_URL`, and selected models come only from `ALLOWED_MODELS`.
+
+## Container contract
 
 - Reads `/input/tasks.json`
 - Writes `/output/results.json`
-- Reads `FIREWORKS_API_KEY`, `FIREWORKS_BASE_URL`, and `ALLOWED_MODELS`
-- Routes every Fireworks call through `FIREWORKS_BASE_URL`
-- Produces one `{ "task_id", "answer" }` object per input task
+- Linux `amd64`
+- Exit code `0` on success
 
-## Expected model plan for the published list
+## Important
 
-- `minimax-m3`: factual, math, sentiment, summary, NER, logic
-- `kimi-k2p7-code`: debugging and code generation
-- Gemma models: not called; no paid deployment required
+This is an aggressive experiment intended to approach sub-1,000 scored tokens. Preserve the V17.4 image/commit before replacing `latest`; hidden-set accuracy cannot be guaranteed.

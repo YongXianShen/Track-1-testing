@@ -1,8 +1,8 @@
-"""Track 1 Judge-Aware Lean V17.4.
+"""Track 1 Batch-Lean V17.5.
 
-Built from the proven no-paid-Gemma V12 baseline.  It preserves V12 model
-selection and one-call routing while tightening classification, local confidence,
-and output budgets.
+Built from the 94.7% V17.4 submission.  High-confidence tasks remain local;
+all other non-code tasks are sent in one MiniMax request and all code tasks in
+one Kimi request.  Missing or malformed batch answers fall back individually.
 """
 from __future__ import annotations
 
@@ -13,14 +13,13 @@ import sys
 import time
 from typing import Any
 
-from . import client, models, prompts, router, solvers
+from . import batching, client, models, prompts, router, solvers
 
 INPUT_PATH = os.environ.get("INPUT_PATH", "/input/tasks.json")
 OUTPUT_PATH = os.environ.get("OUTPUT_PATH", "/output/results.json")
 DEADLINE_SECONDS = float(os.environ.get("DEADLINE_SECONDS", str(8.5 * 60)))
-CONCURRENCY = int(os.environ.get("CONCURRENCY", "4"))
 ENABLE_LOCAL = os.environ.get("ENABLE_LOCAL", "1").strip().lower() in {"1", "true", "yes"}
-ENABLE_LLM_ROUTE_FALLBACK = os.environ.get("ENABLE_LLM_ROUTE_FALLBACK", "1").strip().lower() in {"1", "true", "yes"}
+ENABLE_BATCH = os.environ.get("ENABLE_BATCH", "1").strip().lower() in {"1", "true", "yes"}
 
 START = time.monotonic()
 CALL_LOG: list[dict[str, Any]] = []
@@ -39,87 +38,97 @@ def _prompt(task: dict[str, Any]) -> str:
     return ""
 
 
-async def try_complete(
-    task_id: str,
-    category: str,
-    model: str,
-    messages: list[dict[str, str]],
-    max_tokens: int,
-) -> tuple[str, bool]:
+async def try_complete(label: str, model: str, messages: list[dict[str, str]], max_tokens: int) -> tuple[str, bool]:
     try:
         text, usage = await client.complete(model, messages, max_tokens)
         truncated = bool(usage.pop("truncated", False))
-        CALL_LOG.append({"task_id": task_id, "category": category, "model": model, **usage, "truncated": truncated})
-        log("USAGE", task_id=task_id, category=category, model=model, **usage, truncated=truncated)
+        CALL_LOG.append({"label": label, "model": model, **usage, "truncated": truncated})
+        log("USAGE", label=label, model=model, **usage, truncated=truncated)
         return text, truncated
     except Exception as error:
-        log("ERROR", task_id=task_id, category=category, model=model, error=str(error)[:220])
+        log("ERROR", label=label, model=model, error=str(error)[:220])
         return "", False
 
 
-async def classify_by_llm(task_id: str, prompt: str, plan: models.ModelPlan) -> str:
-    text, _ = await try_complete(task_id, "router", plan.SMALL, router.fallback_messages(prompt), max_tokens=3)
-    return router.parse_fallback_letter(text)
+async def individual_fallback(item: dict[str, str], plan: models.ModelPlan) -> str:
+    messages, max_tokens = prompts.render(item["category"], item["prompt"])
+    primary = models.model_for(item["category"], plan)
+    answer, truncated = await try_complete("fallback:" + item["task_id"], primary, messages, max_tokens)
+    if not answer.strip() or truncated:
+        backup = models.fallback_model(item["category"], plan)
+        if backup != primary:
+            candidate, candidate_truncated = await try_complete(
+                "fallback2:" + item["task_id"], backup, messages, max_tokens
+            )
+            if candidate.strip() and not candidate_truncated:
+                answer = candidate
+    return prompts.postprocess(item["category"], answer)
 
 
-async def solve_task(
-    task: dict[str, Any],
-    plan: models.ModelPlan,
-    sem: asyncio.Semaphore,
-    results: dict[str, str],
-) -> None:
-    task_id = str(task.get("task_id", ""))
-    try:
-        prompt = _prompt(task)
-        if not prompt:
-            results[task_id] = ""
-            return
+async def solve_batch(items: list[dict[str, str]], plan: models.ModelPlan, code_batch: bool) -> dict[str, str]:
+    if not items:
+        return {}
+    model = plan.CODE if code_batch else plan.REASON
+    messages = batching.make_messages(items, code_batch=code_batch)
+    cap = batching.batch_cap(items, code_batch=code_batch)
+    label = "batch:code" if code_batch else "batch:general"
+    text, truncated = await try_complete(label, model, messages, cap)
+    categories = {item["task_id"]: item["category"] for item in items}
+    answers = {} if truncated else batching.parse_answers(text, set(categories), categories)
 
-        category = router.classify(prompt)
-        if category is None and ENABLE_LLM_ROUTE_FALLBACK:
-            async with sem:
-                category = await classify_by_llm(task_id, prompt, plan)
-        category = category or "factual"
-
-        if ENABLE_LOCAL:
-            local = solvers.solve(category, prompt)
-            if local:
-                log("LOCAL", task_id=task_id, category=category)
-                results[task_id] = local
-                return
-
-        messages, max_tokens = prompts.render(category, prompt)
-        primary = models.model_for(category, plan)
-        async with sem:
-            answer, truncated = await try_complete(task_id, category, primary, messages, max_tokens)
-            if not answer.strip() or truncated:
-                backup = models.fallback_model(category, plan)
-                fallback_answer, fallback_truncated = await try_complete(
-                    task_id, category + ":fallback", backup, messages, max_tokens
-                )
-                if fallback_answer.strip() and not fallback_truncated:
-                    answer = fallback_answer
-                elif not answer.strip():
-                    answer = fallback_answer
-        results[task_id] = prompts.postprocess(category, answer)
-    except Exception as error:
-        log("TASK_ERROR", task_id=task_id, error=str(error)[:220])
-        results[task_id] = ""
+    # Reliability first: only missing/malformed entries use the proven V17.4 path.
+    missing = [item for item in items if item["task_id"] not in answers]
+    if missing:
+        log("BATCH_MISSING", label=label, count=len(missing), ids=[x["task_id"] for x in missing])
+        recovered = await asyncio.gather(*(individual_fallback(item, plan) for item in missing))
+        for item, answer in zip(missing, recovered):
+            if answer.strip():
+                answers[item["task_id"]] = answer.strip()
+    return answers
 
 
 async def run(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
     plan = models.build_plan()
     MODEL_PLAN.update(plan.as_dict())
-    log("MODEL_PLAN", **MODEL_PLAN, version="V17.4", gemma_used=False)
-    sem = asyncio.Semaphore(max(1, min(CONCURRENCY, 8)))
-    jobs = [solve_task(task, plan, sem, results) for task in tasks]
-    remaining = DEADLINE_SECONDS - (time.monotonic() - START)
-    try:
-        await asyncio.wait_for(asyncio.gather(*jobs, return_exceptions=True), timeout=max(5, remaining))
-    except asyncio.TimeoutError:
-        log("DEADLINE", elapsed=round(time.monotonic() - START, 1))
-    finally:
-        await client.aclose()
+    log("MODEL_PLAN", **MODEL_PLAN, version="V17.5", gemma_used=False, batch=ENABLE_BATCH)
+
+    pending_general: list[dict[str, str]] = []
+    pending_code: list[dict[str, str]] = []
+    for task in tasks:
+        task_id = str(task["task_id"])
+        prompt = _prompt(task)
+        if not prompt:
+            continue
+        category = router.classify(prompt) or "factual"
+        if ENABLE_LOCAL:
+            local = solvers.solve(category, prompt)
+            if local:
+                results[task_id] = local
+                log("LOCAL", task_id=task_id, category=category)
+                continue
+        item = {"task_id": task_id, "category": category, "prompt": prompt}
+        (pending_code if category in {"debug", "codegen"} else pending_general).append(item)
+
+    if ENABLE_BATCH:
+        remaining = DEADLINE_SECONDS - (time.monotonic() - START)
+        try:
+            general_answers, code_answers = await asyncio.wait_for(
+                asyncio.gather(
+                    solve_batch(pending_general, plan, code_batch=False),
+                    solve_batch(pending_code, plan, code_batch=True),
+                ),
+                timeout=max(5, remaining),
+            )
+            results.update(general_answers)
+            results.update(code_answers)
+        except asyncio.TimeoutError:
+            log("DEADLINE", elapsed=round(time.monotonic() - START, 1))
+    else:
+        all_pending = pending_general + pending_code
+        answers = await asyncio.gather(*(individual_fallback(item, plan) for item in all_pending))
+        for item, answer in zip(all_pending, answers):
+            results[item["task_id"]] = answer
+    await client.aclose()
 
 
 def write_results(tasks: list[dict[str, Any]], results: dict[str, str]) -> None:
@@ -146,7 +155,7 @@ def write_usage_log() -> None:
         }
         path = os.path.join(os.path.dirname(OUTPUT_PATH) or ".", "model_usage.json")
         with open(path, "w", encoding="utf-8") as file:
-            json.dump({"version": "V17.4", "model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, file, ensure_ascii=False, indent=2)
+            json.dump({"version": "V17.5", "model_plan": MODEL_PLAN, "calls": CALL_LOG, "totals": totals}, file, ensure_ascii=False, indent=2)
     except Exception as error:
         log("WARN", error=str(error)[:180])
 
